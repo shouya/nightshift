@@ -3,12 +3,11 @@ mod types;
 
 use std::{
     ffi::OsStr,
-    io,
     time::{self, Duration, SystemTime},
 };
 
 use anyhow::Context;
-use fuser::FileAttr;
+use fuser::{FileAttr, TimeOrNow};
 use rusqlite::{params, Connection};
 
 use errors::{Error, Result};
@@ -30,6 +29,13 @@ fn export_systemtime(t: SystemTime) -> (u64, u32) {
     (d.as_secs(), d.subsec_nanos())
 }
 
+fn export_time_or_now(t: TimeOrNow) -> (u64, u32) {
+    export_systemtime(match t {
+        TimeOrNow::Now => SystemTime::now(),
+        TimeOrNow::SpecificTime(t) => t,
+    })
+}
+
 fn import_kind(kind: u8) -> fuser::FileType {
     FileType::try_from(kind).expect("Invalid inode kind").into()
 }
@@ -49,6 +55,13 @@ impl RowCounter {
         self.c += 1;
         x
     }
+}
+
+struct ListDirEntry<'n> {
+    ino: u64,
+    name: &'n OsStr,
+    kind: fuser::FileType,
+    offset: i64,
 }
 
 struct NightshiftDB {
@@ -91,6 +104,16 @@ impl NightshiftDB {
         Ok(ino)
     }
 
+    fn set_attr(&mut self, name: &str, value: impl rusqlite::ToSql) -> Result<()> {
+        let affected = self
+            .db
+            .execute(&format! {"UPDATE inode SET `{name}` = ?"}, params![value])?;
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     fn create_inode(&mut self, attr: &mut fuser::FileAttr) -> Result<()> {
         let (atime_secs, atime_nanos) = export_systemtime(attr.atime);
         let (mtime_secs, mtime_nanos) = export_systemtime(attr.mtime);
@@ -128,6 +151,24 @@ impl NightshiftDB {
         stmt.insert(params![parent_ino, name.as_encoded_bytes(), ino])?;
         Ok(())
     }
+
+    fn list_dir(&mut self, parent_ino: u64, offset: i64, mut iter: impl FnMut(ListDirEntry) -> bool) -> Result<()> {
+        let mut stmt = self.db.prepare_cached(include_str!("queries/list-dir.sql"))?;
+        let mut rows = stmt.query(params![parent_ino, offset])?;
+        while let Some(row) = rows.next()? {
+            let name: Vec<u8> = row.get(1)?;
+            let entry = ListDirEntry {
+                ino: row.get(0)?,
+                name: unsafe { OsStr::from_encoded_bytes_unchecked(&name) },
+                kind: import_kind(row.get(2)?),
+                offset: row.get(0)?,
+            };
+            if !iter(entry) {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 struct NightshiftFuse {
@@ -135,10 +176,100 @@ struct NightshiftFuse {
 }
 
 impl NightshiftFuse {
-    fn lookup_impl(&mut self, req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr) -> Result<FileAttr> {
+    fn ensure_root_exists(&mut self) -> Result<()> {
+        match dbg!(self.db.lookup_inode(1)) {
+            // If ino is 1, this is the root directory.
+            Err(e) if e == Error::NotFound => {
+                log::debug!("ino=1 requested, but does not exist yet. Creating...");
+                let now = SystemTime::now();
+
+                let mut attr = FileAttr {
+                    ino: 0,
+                    size: 4096,
+                    blocks: 1,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    crtime: now,
+                    kind: fuser::FileType::Directory,
+                    perm: 0766u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
+                    nlink: 0,
+                    uid: 1000,
+                    gid: 1000,
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                };
+                self.db.create_inode(&mut attr)?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }?;
+        Ok(())
+    }
+
+    fn lookup_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr) -> Result<FileAttr> {
         let ino = self.db.lookup_dir_entry(parent, name)?;
         let attr = self.db.lookup_inode(ino)?;
         Ok(attr)
+    }
+
+    fn setattr_impl(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+    ) -> Result<FileAttr> {
+        // TODO optimize
+        if let Some(mode) = mode {
+            self.db.set_attr("mode", mode)?;
+        }
+        if let Some(uid) = uid {
+            self.db.set_attr("uid", uid)?;
+        }
+        if let Some(gid) = gid {
+            self.db.set_attr("gid", gid)?;
+        }
+        if let Some(size) = size {
+            self.db.set_attr("size", size)?;
+        }
+        if let Some(atime) = atime {
+            let (atime_secs, atime_nanos) = export_time_or_now(atime);
+            self.db.set_attr("atime_secs", atime_secs)?;
+            self.db.set_attr("atime_nanos", atime_nanos)?;
+        }
+        if let Some(mtime) = mtime {
+            let (mtime_secs, mtime_nanos) = export_time_or_now(mtime);
+            self.db.set_attr("mtime_secs", mtime_secs)?;
+            self.db.set_attr("mtime_nanos", mtime_nanos)?;
+        }
+        if let Some(ctime) = ctime {
+            let (ctime_secs, ctime_nanos) = export_systemtime(ctime);
+            self.db.set_attr("ctime_secs", ctime_secs)?;
+            self.db.set_attr("ctime_nanos", ctime_nanos)?;
+        }
+        if let Some(crtime) = crtime {
+            let (crtime_secs, crtime_nanos) = export_systemtime(crtime);
+            self.db.set_attr("crtime_secs", crtime_secs)?;
+            self.db.set_attr("crtime_nanos", crtime_nanos)?;
+        }
+        if let Some(flags) = flags {
+            self.db.set_attr("flags", flags)?;
+        }
+
+        self.db.lookup_inode(ino)
     }
 
     fn mknod_impl(
@@ -150,6 +281,7 @@ impl NightshiftFuse {
         umask: u32,
         rdev: u32,
     ) -> Result<FileAttr> {
+        log::debug!("mode is o={:#o} d={} h={:#x}", mode, mode, mode);
         let kind = FileType::from_mode(mode).ok_or_else(|| Error::InvalidArgument)?;
         let now = SystemTime::now();
 
@@ -207,23 +339,37 @@ impl NightshiftFuse {
         Ok(attr)
     }
 
-    fn readdir_impl(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64) -> Result<()> {
-        let attr = match self.db.lookup_inode(ino) {
-            Ok(attr) => attr,
-            // If ino is 1, this is the root directory.
-            Err(e) if e == Error::NotFound && ino == 1 => self.mkdir_impl(req, ino, &OsStr::new("."), 0755, 0022)?,
-            Err(e) => return Err(e),
-        };
-
+    fn readdir_impl<F>(&mut self, _req: &fuser::Request<'_>, ino: u64, _fh: u64, offset: i64, iter: F) -> Result<()>
+    where
+        F: FnMut(ListDirEntry) -> bool,
+    {
+        self.db.list_dir(ino, offset, iter)?;
         Ok(())
     }
 }
 
 impl fuser::Filesystem for NightshiftFuse {
+    fn init(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _config: &mut fuser::KernelConfig,
+    ) -> std::result::Result<(), libc::c_int> {
+        log::info!("called");
+        match self.ensure_root_exists() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                log::error!("init error: {}", e);
+                Err(e.errno())
+            }
+        }
+    }
+
     fn lookup(&mut self, req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
         log::debug!("lookup(parent={}, name={:?})", parent, name.to_string_lossy());
+        let res = self.lookup_impl(req, parent, name);
+        log::debug!("lookup: {:?}", res);
 
-        match self.lookup_impl(req, parent, name) {
+        match res {
             Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
@@ -231,8 +377,47 @@ impl fuser::Filesystem for NightshiftFuse {
 
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         log::debug!("getattr(ino={})", ino);
+        let res = self.db.lookup_inode(ino);
+        log::debug!("getattr: {:?}", res);
 
-        match self.db.lookup_inode(ino) {
+        match res {
+            Ok(attr) => reply.attr(&DURATION, &attr),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        req: &fuser::Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: fuser::ReplyAttr,
+    ) {
+        log::debug!(
+            "setattr(ino={}, mode={:#?}, uid={:?}, gid={:?}, size={:?})",
+            ino,
+            mode,
+            uid,
+            gid,
+            size,
+        );
+        let res = self.setattr_impl(
+            req, ino, mode, uid, gid, size, atime, mtime, ctime, fh, crtime, chgtime, bkuptime, flags,
+        );
+        log::debug!("setattr: {:?}", res);
+
+        match res {
             Ok(attr) => reply.attr(&DURATION, &attr),
             Err(e) => reply.error(e.errno()),
         }
@@ -256,8 +441,10 @@ impl fuser::Filesystem for NightshiftFuse {
             umask,
             rdev
         );
+        let res = self.mknod_impl(req, parent, name, mode, umask, rdev);
+        log::debug!("mknod: {:?}", res);
 
-        match self.mknod_impl(req, parent, name, mode, umask, rdev) {
+        match res {
             Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
@@ -279,21 +466,26 @@ impl fuser::Filesystem for NightshiftFuse {
             mode,
             umask,
         );
+        let res = self.mkdir_impl(req, parent, name, mode, umask);
+        log::debug!("mkdir: {:?}", res);
 
-        match self.mkdir_impl(req, parent, name, mode, umask) {
+        match res {
             Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
 
-    fn opendir(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
-        log::debug!("opendir(ino={}, flags={})", ino, flags);
-
-        reply.opened(1337, 0)
-    }
-
-    fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, reply: fuser::ReplyDirectory) {
+    fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, mut reply: fuser::ReplyDirectory) {
         log::debug!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
+        let res = self.readdir_impl(req, ino, fh, offset, |entry| {
+            return reply.add(entry.ino, entry.offset, entry.kind, entry.name);
+        });
+        log::debug!("readdir: {:?}", res);
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.errno()),
+        }
     }
 }
 
@@ -305,9 +497,14 @@ fn main() -> anyhow::Result<()> {
 
     let fs = NightshiftFuse {
         db: NightshiftDB {
-            db: Connection::open_in_memory().context("unable to open database")?,
+            db: Connection::open("foo.db").context("unable to open database")?,
         },
     };
+    fs.db
+        .db
+        .execute_batch(include_str!("queries/schema.sql"))
+        .context("schema")?;
+
     let mount = fuser::spawn_mount2(fs, "mnt-target", &[]).context("unable to create mount")?;
 
     let mut signals = Signals::new(&[SIGTERM, SIGINT])?;

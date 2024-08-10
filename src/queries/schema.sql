@@ -1,29 +1,29 @@
 CREATE TABLE inode(
-    ino INT PRIMARY KEY,
-    size INT NOT NULL,
-    blocks INT NOT NULL,
-    atime_secs INT NOT NULL,
-    atime_nanos INT NOT NULL,
-    mtime_secs INT NOT NULL,
-    mtime_nanos INT NOT NULL,
-    ctime_secs INT NOT NULL,
-    ctime_nanos INT NOT NULL,
-    crtime_secs INT NOT NULL,
-    crtime_nanos INT NOT NULL,
-    kind INT NOT NULL,
-    perm INT NOT NULL,
-    nlink INT NOT NULL,
-    uid INT NOT NULL,
-    gid INT NOT NULL,
-    rdev INT NOT NULL,
-    blksize INT NOT NULL,
-    flags INT NOT NULL
+    ino INTEGER PRIMARY KEY,
+    size INTEGER NOT NULL,
+    blocks INTEGER NOT NULL,
+    atime_secs INTEGER NOT NULL,
+    atime_nanos INTEGER NOT NULL,
+    mtime_secs INTEGER NOT NULL,
+    mtime_nanos INTEGER NOT NULL,
+    ctime_secs INTEGER NOT NULL,
+    ctime_nanos INTEGER NOT NULL,
+    crtime_secs INTEGER NOT NULL,
+    crtime_nanos INTEGER NOT NULL,
+    kind INTEGER NOT NULL,
+    perm INTEGER NOT NULL,
+    nlink INTEGER NOT NULL,
+    uid INTEGER NOT NULL,
+    gid INTEGER NOT NULL,
+    rdev INTEGER NOT NULL,
+    blksize INTEGER NOT NULL,
+    flags INTEGER NOT NULL
 );
 
 CREATE TABLE dir_entry (
-    parent_ino INT NOT NULL,
+    parent_ino INTEGER NOT NULL,
     name BLOB NOT NULL,
-    ino INT NOT NULL
+    ino INTEGER NOT NULL
 );
 
-CREATE INDEX entry_parent_ino_name_idx ON entry (parent_ino, name);
+CREATE INDEX entry_parent_ino_name_idx ON dir_entry (parent_ino, name);

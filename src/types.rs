@@ -13,7 +13,8 @@ pub enum FileType {
 impl FileType {
     pub fn from_mode(value: libc::mode_t) -> Option<FileType> {
         // https://man7.org/linux/man-pages/man2/mknod.2.html
-        match value {
+        // https://stackoverflow.com/a/47579162
+        match value & libc::S_IFMT {
             libc::S_IFREG => Some(FileType::RegularFile),
             libc::S_IFCHR => Some(FileType::CharDevice),
             libc::S_IFBLK => Some(FileType::BlockDevice),
