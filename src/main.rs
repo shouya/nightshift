@@ -1,3 +1,4 @@
+mod errors;
 mod types;
 
 use std::{
@@ -10,6 +11,7 @@ use anyhow::Context;
 use fuser::FileAttr;
 use rusqlite::{params, Connection};
 
+use errors::{Error, Result};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,
@@ -18,13 +20,6 @@ use simple_logger::SimpleLogger;
 use types::FileType;
 
 static DURATION: &'static Duration = &Duration::from_secs(1);
-
-fn sql_to_io(e: rusqlite::Error) -> io::Error {
-    match e {
-        rusqlite::Error::QueryReturnedNoRows => io::Error::new(io::ErrorKind::NotFound, "not found"),
-        _ => io::Error::other("other error"),
-    }
-}
 
 fn import_systemtime(secs: u64, nanos: u32) -> SystemTime {
     time::UNIX_EPOCH + Duration::new(secs, nanos)
@@ -61,7 +56,7 @@ struct NightshiftDB {
 }
 
 impl NightshiftDB {
-    fn lookup_inode(&mut self, ino: u64) -> io::Result<fuser::FileAttr> {
+    fn lookup_inode(&mut self, ino: u64) -> Result<fuser::FileAttr> {
         let attr = self
             .db
             .query_row("SELECT * FROM inode WHERE ino = ?", params![ino], |row| {
@@ -83,67 +78,54 @@ impl NightshiftDB {
                     blksize: row.get(rc.next())?,
                     flags: row.get(rc.next())?,
                 })
-            })
-            .map_err(sql_to_io)?;
+            })?;
         Ok(attr)
     }
 
-    fn lookup_dir_entry(&mut self, parent_ino: u64, name: &OsStr) -> io::Result<u64> {
-        let ino = self
-            .db
-            .query_row(
-                "SELECT ino FROM dir_entry WHERE parent_ino = ? AND name = ?",
-                params![parent_ino, name.as_encoded_bytes()],
-                |row| row.get(0),
-            )
-            .map_err(sql_to_io)?;
+    fn lookup_dir_entry(&mut self, parent_ino: u64, name: &OsStr) -> Result<u64> {
+        let ino = self.db.query_row(
+            "SELECT ino FROM dir_entry WHERE parent_ino = ? AND name = ?",
+            params![parent_ino, name.as_encoded_bytes()],
+            |row| row.get(0),
+        )?;
         Ok(ino)
     }
 
-    fn create_inode(&mut self, attr: &mut fuser::FileAttr) -> io::Result<()> {
+    fn create_inode(&mut self, attr: &mut fuser::FileAttr) -> Result<()> {
         let (atime_secs, atime_nanos) = export_systemtime(attr.atime);
         let (mtime_secs, mtime_nanos) = export_systemtime(attr.mtime);
         let (ctime_secs, ctime_nanos) = export_systemtime(attr.ctime);
         let (crtime_secs, crtime_nanos) = export_systemtime(attr.crtime);
 
-        let mut stmt = self
-            .db
-            .prepare_cached(include_str!("queries/insert-inode.sql"))
-            .map_err(sql_to_io)?;
-        let ino = stmt
-            .insert(params![
-                attr.size,
-                attr.blocks,
-                atime_secs,
-                atime_nanos,
-                mtime_secs,
-                mtime_nanos,
-                ctime_secs,
-                ctime_nanos,
-                crtime_secs,
-                crtime_nanos,
-                export_kind(attr.kind),
-                attr.perm,
-                attr.nlink,
-                attr.uid,
-                attr.gid,
-                attr.rdev,
-                attr.blksize,
-                attr.flags,
-            ])
-            .map_err(sql_to_io)?;
+        let mut stmt = self.db.prepare_cached(include_str!("queries/insert-inode.sql"))?;
+        let ino = stmt.insert(params![
+            attr.size,
+            attr.blocks,
+            atime_secs,
+            atime_nanos,
+            mtime_secs,
+            mtime_nanos,
+            ctime_secs,
+            ctime_nanos,
+            crtime_secs,
+            crtime_nanos,
+            export_kind(attr.kind),
+            attr.perm,
+            attr.nlink,
+            attr.uid,
+            attr.gid,
+            attr.rdev,
+            attr.blksize,
+            attr.flags,
+        ])?;
 
         attr.ino = ino as u64;
         Ok(())
     }
 
-    fn create_dir_entry(&mut self, parent_ino: u64, name: &OsStr, ino: u64) -> io::Result<()> {
-        let mut stmt = self
-            .db
-            .prepare_cached(include_str!("queries/insert-dir-entry.sql"))
-            .map_err(sql_to_io)?;
-        stmt.insert(params![parent_ino, name.as_encoded_bytes(), ino])
-            .map_err(sql_to_io)?;
+    fn create_dir_entry(&mut self, parent_ino: u64, name: &OsStr, ino: u64) -> Result<()> {
+        let mut stmt = self.db.prepare_cached(include_str!("queries/insert-dir-entry.sql"))?;
+        stmt.insert(params![parent_ino, name.as_encoded_bytes(), ino])?;
         Ok(())
     }
 }
@@ -152,21 +134,98 @@ struct NightshiftFuse {
     db: NightshiftDB,
 }
 
-impl fuser::Filesystem for NightshiftFuse {
-    fn lookup(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
-        log::debug!("lookup(parent={}, name={:?})", parent, name.to_string_lossy());
+impl NightshiftFuse {
+    fn lookup_impl(&mut self, req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr) -> Result<FileAttr> {
+        let ino = self.db.lookup_dir_entry(parent, name)?;
+        let attr = self.db.lookup_inode(ino)?;
+        Ok(attr)
+    }
 
-        let ino = match self.db.lookup_dir_entry(parent, name) {
-            Ok(ino) => ino,
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-                return;
-            }
+    fn mknod_impl(
+        &mut self,
+        req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        rdev: u32,
+    ) -> Result<FileAttr> {
+        let kind = FileType::from_mode(mode).ok_or_else(|| Error::InvalidArgument)?;
+        let now = SystemTime::now();
+
+        let mut attr = FileAttr {
+            ino: 0,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: kind.into(),
+            perm: 0766u16 & umask as u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
+            nlink: 0,
+            uid: req.uid(),
+            gid: req.gid(),
+            rdev,
+            blksize: 4096,
+            flags: 0,
+        };
+        // TODO transaction
+        self.db.create_inode(&mut attr)?;
+        self.db.create_dir_entry(parent, name, attr.ino)?;
+        Ok(attr)
+    }
+
+    fn mkdir_impl(
+        &mut self,
+        req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        umask: u32,
+    ) -> Result<FileAttr> {
+        let now = SystemTime::now();
+        let mut attr = FileAttr {
+            ino: 0,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: fuser::FileType::Directory,
+            perm: 0755u16 & umask as u16, // TODO probably bad
+            nlink: 0,
+            uid: req.uid(),
+            gid: req.gid(),
+            rdev: 0, // Not given for directory?
+            blksize: 4096,
+            flags: 0,
+        };
+        self.db.create_inode(&mut attr)?;
+        self.db.create_dir_entry(parent, name, attr.ino)?;
+        Ok(attr)
+    }
+
+    fn readdir_impl(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64) -> Result<()> {
+        let attr = match self.db.lookup_inode(ino) {
+            Ok(attr) => attr,
+            // If ino is 1, this is the root directory.
+            Err(e) if e == Error::NotFound && ino == 1 => self.mkdir_impl(req, ino, &OsStr::new("."), 0755, 0022)?,
+            Err(e) => return Err(e),
         };
 
-        match self.db.lookup_inode(ino) {
+        Ok(())
+    }
+}
+
+impl fuser::Filesystem for NightshiftFuse {
+    fn lookup(&mut self, req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
+        log::debug!("lookup(parent={}, name={:?})", parent, name.to_string_lossy());
+
+        match self.lookup_impl(req, parent, name) {
             Ok(attr) => reply.entry(&DURATION, &attr, 0),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EINVAL)),
+            Err(e) => reply.error(e.errno()),
         }
     }
 
@@ -175,7 +234,7 @@ impl fuser::Filesystem for NightshiftFuse {
 
         match self.db.lookup_inode(ino) {
             Ok(attr) => reply.attr(&DURATION, &attr),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EINVAL)),
+            Err(e) => reply.error(e.errno()),
         }
     }
 
@@ -198,42 +257,10 @@ impl fuser::Filesystem for NightshiftFuse {
             rdev
         );
 
-        let kind = match FileType::from_mode(mode) {
-            Some(kind) => kind,
-            None => {
-                reply.error(libc::EINVAL);
-                return;
-            }
-        };
-        let now = SystemTime::now();
-
-        let mut attr = FileAttr {
-            ino: 0,
-            size: 0,
-            blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: kind.into(),
-            perm: 0766u16 & umask as u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-            nlink: 0,
-            uid: req.uid(),
-            gid: req.gid(),
-            rdev,
-            blksize: 4096,
-            flags: 0,
-        };
-        // TODO transaction
-        if let Err(e) = self.db.create_inode(&mut attr) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-            return;
+        match self.mknod_impl(req, parent, name, mode, umask, rdev) {
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
+            Err(e) => reply.error(e.errno()),
         }
-        if let Err(e) = self.db.create_dir_entry(parent, name, attr.ino) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-            return;
-        }
-        reply.entry(&DURATION, &attr, 0);
     }
 
     fn mkdir(
@@ -241,38 +268,22 @@ impl fuser::Filesystem for NightshiftFuse {
         req: &fuser::Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        let now = SystemTime::now();
+        log::debug!(
+            "mkdir(parent={}, name={:?}, mode={}, umask={:#o})",
+            parent,
+            name.to_string_lossy(),
+            mode,
+            umask,
+        );
 
-        let mut attr = FileAttr {
-            ino: 0,
-            size: 0,
-            blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: fuser::FileType::Directory,
-            perm: 0755u16 & umask as u16, // TODO probably bad
-            nlink: 0,
-            uid: req.uid(),
-            gid: req.gid(),
-            rdev: 0,
-            blksize: 4096,
-            flags: 0,
-        };
-        if let Err(e) = self.db.create_inode(&mut attr) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-            return;
+        match self.mkdir_impl(req, parent, name, mode, umask) {
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
+            Err(e) => reply.error(e.errno()),
         }
-        if let Err(e) = self.db.create_dir_entry(parent, name, attr.ino) {
-            reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-            return;
-        }
-        reply.entry(&DURATION, &attr, 0);
     }
 
     fn opendir(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
@@ -281,21 +292,8 @@ impl fuser::Filesystem for NightshiftFuse {
         reply.opened(1337, 0)
     }
 
-    fn readdir(&mut self, _req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, reply: fuser::ReplyDirectory) {
+    fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, reply: fuser::ReplyDirectory) {
         log::debug!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
-
-        let attr = match self.db.lookup_inode(ino) {
-            Ok(attr) => attr,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && ino == 1 => {
-                self.mkdir(req, parent, name, mode, umask, reply);
-            }
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EINVAL));
-                return;
-            }
-        };
-
-        if ino == 1 {}
     }
 }
 
