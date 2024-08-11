@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod errors;
 mod types;
 
@@ -18,7 +20,7 @@ use signal_hook::{
 use simple_logger::SimpleLogger;
 use types::FileType;
 
-static DURATION: &'static Duration = &Duration::from_secs(1);
+static DURATION: &Duration = &Duration::from_secs(1);
 
 fn import_systemtime(secs: u64, nanos: u32) -> SystemTime {
     time::UNIX_EPOCH + Duration::new(secs, nanos)
@@ -203,7 +205,7 @@ impl NightshiftDB {
         // 5000
 
         let mut stmt = self.db.prepare_cached(
-            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? <= end_offset",
+            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
         )?;
         let mut block = stmt.query_row(params![ino, offset, offset], |row| {
             Ok(Block {
@@ -220,7 +222,17 @@ impl NightshiftDB {
         block.data.extend_from_slice(data);
         block.size = block.data.len() as u32;
         block.end_offset = block.offset + block.size as u64;
-        log::info!("updated block {:?}", block);
+
+        let mut stmt = self
+            .db
+            .prepare_cached("UPDATE block SET end_offset = ?, size = ?, data = ? WHERE ino = ? AND offset = ?")?;
+        stmt.execute(params![
+            block.end_offset,
+            block.size,
+            block.data,
+            block.ino,
+            block.offset
+        ])?;
 
         Ok(())
     }
@@ -241,9 +253,9 @@ struct NightshiftFuse {
 
 impl NightshiftFuse {
     fn ensure_root_exists(&mut self) -> Result<()> {
-        match dbg!(self.db.lookup_inode(1)) {
+        match self.db.lookup_inode(1) {
             // If ino is 1, this is the root directory.
-            Err(e) if e == Error::NotFound => {
+            Err(Error::NotFound) => {
                 log::debug!("ino=1 requested, but does not exist yet. Creating...");
                 let now = SystemTime::now();
 
@@ -346,7 +358,7 @@ impl NightshiftFuse {
         rdev: u32,
     ) -> Result<FileAttr> {
         log::info!("mknod mode is o={:#o} umask={:#o}", mode, umask);
-        let kind = FileType::from_mode(mode).ok_or_else(|| Error::InvalidArgument)?;
+        let kind = FileType::from_mode(mode).ok_or(Error::InvalidArgument)?;
         let now = SystemTime::now();
 
         let mut attr = FileAttr {
@@ -424,18 +436,18 @@ impl NightshiftFuse {
         _lock_owner: Option<u64>,
     ) -> Result<u32> {
         let offset = offset as u64;
-        dbg!(self.db.truncate_blocks(ino, offset)?);
+        self.db.truncate_blocks(ino, offset)?;
         match self.db.update_block(ino, offset, data) {
             Ok(_) => {
                 log::debug!("block modified");
                 Ok(data.len() as u32)
             }
-            Err(e) if e == Error::NotFound => {
+            Err(Error::NotFound) => {
                 log::debug!("block not modified, creating new block");
                 self.db.create_block(ino, offset, data)?;
                 Ok(data.len() as u32)
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
     }
 }
@@ -462,7 +474,7 @@ impl fuser::Filesystem for NightshiftFuse {
         log::debug!("lookup: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(&DURATION, &attr, 0),
+            Ok(attr) => reply.entry(DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -473,7 +485,7 @@ impl fuser::Filesystem for NightshiftFuse {
         log::debug!("getattr: {:?}", res);
 
         match res {
-            Ok(attr) => reply.attr(&DURATION, &attr),
+            Ok(attr) => reply.attr(DURATION, &attr),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -510,7 +522,7 @@ impl fuser::Filesystem for NightshiftFuse {
         log::debug!("setattr: {:?}", res);
 
         match res {
-            Ok(attr) => reply.attr(&DURATION, &attr),
+            Ok(attr) => reply.attr(DURATION, &attr),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -537,7 +549,7 @@ impl fuser::Filesystem for NightshiftFuse {
         log::debug!("mknod: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(&DURATION, &attr, 0),
+            Ok(attr) => reply.entry(DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -562,7 +574,7 @@ impl fuser::Filesystem for NightshiftFuse {
         log::debug!("mkdir: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(&DURATION, &attr, 0),
+            Ok(attr) => reply.entry(DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -570,7 +582,7 @@ impl fuser::Filesystem for NightshiftFuse {
     fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, mut reply: fuser::ReplyDirectory) {
         log::debug!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
         let res = self.readdir_impl(req, ino, fh, offset, |entry| {
-            return reply.add(entry.ino, entry.offset, entry.kind, entry.name);
+            reply.add(entry.ino, entry.offset, entry.kind, entry.name)
         });
         log::debug!("readdir: {:?}", res);
 
@@ -605,7 +617,7 @@ impl fuser::Filesystem for NightshiftFuse {
 
 fn main() -> anyhow::Result<()> {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Info)
         .init()
         .context("unable to install logging")?;
 
@@ -621,7 +633,7 @@ fn main() -> anyhow::Result<()> {
 
     let mount = fuser::spawn_mount2(fs, "mnt-target", &[]).context("unable to create mount")?;
 
-    let mut signals = Signals::new(&[SIGTERM, SIGINT])?;
+    let mut signals = Signals::new([SIGTERM, SIGINT])?;
     loop {
         for signal in signals.pending() {
             match signal as libc::c_int {
