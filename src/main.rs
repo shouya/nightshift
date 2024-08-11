@@ -703,13 +703,14 @@ impl fuser::Filesystem for NightshiftFuse {
 
 fn main() -> anyhow::Result<()> {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Info)
         .init()
         .context("unable to install logging")?;
 
     let fs = NightshiftFuse {
         db: NightshiftDB {
             db: Connection::open("foo.db").context("unable to open database")?,
+            // db: Connection::open_in_memory().context("unable to open database")?,
         },
     };
     fs.db
