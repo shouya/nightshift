@@ -19,10 +19,6 @@ use fuser::{FileAttr, TimeOrNow};
 use rusqlite::{params, Connection};
 
 use errors::{Error, Result};
-use signal_hook::{
-    consts::{SIGINT, SIGTERM},
-    iterator::Signals,
-};
 use simple_logger::SimpleLogger;
 use types::FileType;
 
@@ -131,10 +127,11 @@ impl NightshiftDB {
         Ok(ino)
     }
 
-    fn set_attr(&mut self, name: &str, value: impl rusqlite::ToSql) -> Result<()> {
-        let affected = self
-            .db
-            .execute(&format! {"UPDATE inode SET `{name}` = ?"}, params![value])?;
+    fn set_attr(&mut self, ino: u64, name: &str, value: impl rusqlite::ToSql) -> Result<()> {
+        let affected = self.db.execute(
+            &format!("UPDATE inode SET `{name}` = ? WHERE ino = ?"),
+            params![value, ino],
+        )?;
         if affected == 0 {
             return Err(Error::NotFound);
         }
@@ -221,11 +218,9 @@ impl NightshiftDB {
         Ok(deleted)
     }
 
-    fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
-        // 0 - 4096
-        // 4096 - 8192
-        // 5000
+    fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(u64, i64)> {
         let mut block = self.get_block_at(ino, offset)?;
+        let start_size = block.data.len() as i64;
 
         let internal_offset = (offset - block.offset) as usize;
         let internal_available = block.size as usize - internal_offset;
@@ -233,10 +228,10 @@ impl NightshiftDB {
         let internal_end_offset = (internal_offset + write_size) as usize;
         let data = &data[..write_size as usize];
 
+        block.data.resize(internal_end_offset, 0);
         block.data[internal_offset..internal_end_offset].copy_from_slice(data);
-        block.data.extend_from_slice(data);
         block.end_offset = block.offset + block.size as u64;
-        self.set_attr("size", block.end_offset)?;
+        self.set_attr(ino, "size", block.end_offset)?;
 
         let mut stmt = self
             .db
@@ -249,19 +244,21 @@ impl NightshiftDB {
             block.offset
         ])?;
 
-        Ok(write_size as usize)
+        Ok((write_size as u64, block.data.len() as i64 - start_size))
     }
 
-    fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
-        let end_offset = offset + data.len() as u64;
+    fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<u64> {
+        let block_size = 512usize;
+        let end_offset = offset + block_size as u64;
+        let write_size = cmp::min(data.len(), block_size);
         {
             let mut stmt = self
                 .db
                 .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
-            stmt.execute(params![ino, offset, end_offset, data.len(), data])?;
+            stmt.execute(params![ino, offset, end_offset, block_size, &data[..write_size]])?;
         }
-        self.set_attr("size", end_offset)?;
-        Ok(data.len())
+        self.set_attr(ino, "size", end_offset)?;
+        Ok(write_size as u64)
     }
 }
 
@@ -328,39 +325,39 @@ impl NightshiftFuse {
     ) -> Result<FileAttr> {
         // TODO optimize
         if let Some(mode) = mode {
-            self.db.set_attr("mode", mode)?;
+            self.db.set_attr(ino, "mode", mode)?;
         }
         if let Some(uid) = uid {
-            self.db.set_attr("uid", uid)?;
+            self.db.set_attr(ino, "uid", uid)?;
         }
         if let Some(gid) = gid {
-            self.db.set_attr("gid", gid)?;
+            self.db.set_attr(ino, "gid", gid)?;
         }
         if let Some(size) = size {
-            self.db.set_attr("size", size)?;
+            self.db.set_attr(ino, "size", size)?;
         }
         if let Some(atime) = atime {
             let (atime_secs, atime_nanos) = export_time_or_now(atime);
-            self.db.set_attr("atime_secs", atime_secs)?;
-            self.db.set_attr("atime_nanos", atime_nanos)?;
+            self.db.set_attr(ino, "atime_secs", atime_secs)?;
+            self.db.set_attr(ino, "atime_nanos", atime_nanos)?;
         }
         if let Some(mtime) = mtime {
             let (mtime_secs, mtime_nanos) = export_time_or_now(mtime);
-            self.db.set_attr("mtime_secs", mtime_secs)?;
-            self.db.set_attr("mtime_nanos", mtime_nanos)?;
+            self.db.set_attr(ino, "mtime_secs", mtime_secs)?;
+            self.db.set_attr(ino, "mtime_nanos", mtime_nanos)?;
         }
         if let Some(ctime) = ctime {
             let (ctime_secs, ctime_nanos) = export_systemtime(ctime);
-            self.db.set_attr("ctime_secs", ctime_secs)?;
-            self.db.set_attr("ctime_nanos", ctime_nanos)?;
+            self.db.set_attr(ino, "ctime_secs", ctime_secs)?;
+            self.db.set_attr(ino, "ctime_nanos", ctime_nanos)?;
         }
         if let Some(crtime) = crtime {
             let (crtime_secs, crtime_nanos) = export_systemtime(crtime);
-            self.db.set_attr("crtime_secs", crtime_secs)?;
-            self.db.set_attr("crtime_nanos", crtime_nanos)?;
+            self.db.set_attr(ino, "crtime_secs", crtime_secs)?;
+            self.db.set_attr(ino, "crtime_nanos", crtime_nanos)?;
         }
         if let Some(flags) = flags {
-            self.db.set_attr("flags", flags)?;
+            self.db.set_attr(ino, "flags", flags)?;
         }
 
         self.db.lookup_inode(ino)
@@ -469,22 +466,37 @@ impl NightshiftFuse {
         _lock_owner: Option<u64>,
     ) -> Result<u32> {
         let size = data.len();
-        let offset = offset as u64;
-        while data.len() > 0 {
+        let mut offset = offset as u64;
+
+        let mut attr = self.db.lookup_inode(ino)?;
+
+        // Overwrite existing blocks until we get a NotFound error indicating
+        // that there's no more blocks to overwrite. This usually happens when
+        // seek is used or the block is incomplete.
+        while !data.is_empty() {
             match self.db.update_block(ino, offset, data) {
-                Ok(written) => {
-                    data = &data[written..];
+                Ok((written, bytes_diff)) => {
+                    data = &data[written as usize..];
+                    offset += written;
+                    attr.size = (attr.size as i64 + bytes_diff) as u64;
                     log::debug!("block modified");
                 }
                 Err(Error::NotFound) => break,
                 Err(e) => return Err(e),
             }
         }
-        while data.len() > 0 {
+
+        // Write the rest of the data in a new block.
+        while !data.is_empty() {
             log::debug!("creating new block");
             let written = self.db.create_block(ino, offset, data)?;
-            data = &data[written..];
+            data = &data[written as usize..];
+            offset += written;
+            attr.size += written;
         }
+
+        self.db.set_attr(ino, "size", attr.size)?;
+
         Ok(size as u32)
     }
 }
@@ -493,9 +505,8 @@ impl fuser::Filesystem for NightshiftFuse {
     fn init(
         &mut self,
         _req: &fuser::Request<'_>,
-        config: &mut fuser::KernelConfig,
+        _config: &mut fuser::KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
-        config.set_max_write(4096);
         match self.ensure_root_exists() {
             Ok(()) => Ok(()),
             Err(e) => {
