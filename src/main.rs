@@ -24,6 +24,7 @@ use simple_logger::SimpleLogger;
 use types::FileType;
 
 static DURATION: &Duration = &Duration::from_secs(1);
+const BLOCK_SIZE: u32 = 4096;
 
 fn import_systemtime(secs: u64, nanos: u32) -> SystemTime {
     time::UNIX_EPOCH + Duration::new(secs, nanos)
@@ -232,7 +233,6 @@ impl NightshiftDB {
         block.data.resize(internal_end_offset, 0);
         block.data[internal_offset..internal_end_offset].copy_from_slice(data);
         block.end_offset = block.offset + block.size as u64;
-        self.set_attr(ino, "size", block.end_offset)?;
 
         let mut stmt = self
             .db
@@ -249,16 +249,14 @@ impl NightshiftDB {
     }
 
     fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<u64> {
-        let block_size = 512usize;
-        let end_offset = offset + block_size as u64;
-        let write_size = cmp::min(data.len(), block_size);
+        let end_offset = offset + BLOCK_SIZE as u64;
+        let write_size = cmp::min(data.len(), BLOCK_SIZE as usize);
         {
             let mut stmt = self
                 .db
                 .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
-            stmt.execute(params![ino, offset, end_offset, block_size, &data[..write_size]])?;
+            stmt.execute(params![ino, offset, end_offset, BLOCK_SIZE, &data[..write_size]])?;
         }
-        self.set_attr(ino, "size", end_offset)?;
         Ok(write_size as u64)
     }
 }
@@ -277,19 +275,19 @@ impl NightshiftFuse {
 
                 let mut attr = FileAttr {
                     ino: 0,
-                    size: 4096,
-                    blocks: 1,
+                    size: 0,
+                    blocks: 0,
                     atime: now,
                     mtime: now,
                     ctime: now,
                     crtime: now,
                     kind: fuser::FileType::Directory,
                     perm: 0o755u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-                    nlink: 0,
+                    nlink: 2,
                     uid: 1000, // TODO get real user
                     gid: 1000, // TODO get real group
                     rdev: 0,
-                    blksize: 4096,
+                    blksize: 0,
                     flags: 0,
                 };
                 self.db.create_inode(&mut attr)?;
@@ -391,7 +389,7 @@ impl NightshiftFuse {
             uid: req.uid(),
             gid: req.gid(),
             rdev,
-            blksize: 4096,
+            blksize: BLOCK_SIZE as u32,
             flags: 0,
         };
         // TODO transaction
@@ -412,19 +410,19 @@ impl NightshiftFuse {
         let now = SystemTime::now();
         let mut attr = FileAttr {
             ino: 0,
-            size: 4096,
-            blocks: 1,
+            size: 0,
+            blocks: 0,
             atime: now,
             mtime: now,
             ctime: now,
             crtime: now,
             kind: fuser::FileType::Directory,
             perm: (mode & !umask) as u16, // TODO probably bad
-            nlink: 0,
+            nlink: 2,
             uid: req.uid(),
             gid: req.gid(),
             rdev: 0, // Not given for directory?
-            blksize: 4096,
+            blksize: 0,
             flags: 0,
         };
         self.db.create_inode(&mut attr)?;
@@ -494,9 +492,11 @@ impl NightshiftFuse {
             data = &data[written as usize..];
             offset += written;
             attr.size += written;
+            attr.blocks += 1;
         }
 
         self.db.set_attr(ino, "size", attr.size)?;
+        self.db.set_attr(ino, "blocks", attr.blocks)?;
 
         Ok(size as u32)
     }
@@ -658,7 +658,7 @@ impl fuser::Filesystem for NightshiftFuse {
     ) {
         log::debug!("read(ino={}, offset={}, size={}", ino, offset, size);
         let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
-        log::debug!("read: {:?}", res);
+        log::debug!("read: {:?}", res.as_ref().map(|d| d.len()));
 
         match res {
             Ok(data) => reply.data(&data),

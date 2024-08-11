@@ -1,4 +1,4 @@
-CREATE TABLE inode(
+CREATE TABLE IF NOT EXISTS inode(
     ino INTEGER PRIMARY KEY,
     size INTEGER NOT NULL,
     blocks INTEGER NOT NULL,
@@ -20,15 +20,15 @@ CREATE TABLE inode(
     flags INTEGER NOT NULL
 );
 
-CREATE TABLE dir_entry (
+CREATE TABLE IF NOT EXISTS dir_entry (
     parent_ino INTEGER NOT NULL,
     name BLOB NOT NULL,
     ino INTEGER NOT NULL
 );
 
-CREATE INDEX entry_parent_ino_name_idx ON dir_entry (parent_ino, name);
+CREATE INDEX IF NOT EXISTS entry_parent_ino_name_idx ON dir_entry (parent_ino, name);
 
-CREATE TABLE block (
+CREATE TABLE IF NOT EXISTS block (
     ino INTEGER NOT NULL,
     offset INTEGER NOT NULL,
     end_offset INTEGER NOT NULL,
@@ -36,4 +36,4 @@ CREATE TABLE block (
     data BLOB NOT NULL
 );
 
-CREATE INDEX block_ino_offsets_idx ON block (ino, offset, end_offset);
+CREATE INDEX IF NOT EXISTS block_ino_offsets_idx ON block (ino, offset, end_offset);
