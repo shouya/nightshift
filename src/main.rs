@@ -4,6 +4,7 @@ mod errors;
 mod types;
 
 use std::{
+    cmp,
     ffi::OsStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -220,16 +221,20 @@ impl NightshiftDB {
         Ok(deleted)
     }
 
-    fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<()> {
+    fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
         // 0 - 4096
         // 4096 - 8192
         // 5000
         let mut block = self.get_block_at(ino, offset)?;
 
-        let internal_offset = offset - block.offset;
-        block.data.truncate(internal_offset as usize);
+        let internal_offset = (offset - block.offset) as usize;
+        let internal_available = block.size as usize - internal_offset;
+        let write_size = cmp::min(internal_available, data.len());
+        let internal_end_offset = (internal_offset + write_size) as usize;
+        let data = &data[..write_size as usize];
+
+        block.data[internal_offset..internal_end_offset].copy_from_slice(data);
         block.data.extend_from_slice(data);
-        block.size = block.data.len() as u32;
         block.end_offset = block.offset + block.size as u64;
         self.set_attr("size", block.end_offset)?;
 
@@ -244,10 +249,10 @@ impl NightshiftDB {
             block.offset
         ])?;
 
-        Ok(())
+        Ok(write_size as usize)
     }
 
-    fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<()> {
+    fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
         let end_offset = offset + data.len() as u64;
         {
             let mut stmt = self
@@ -256,7 +261,7 @@ impl NightshiftDB {
             stmt.execute(params![ino, offset, end_offset, data.len(), data])?;
         }
         self.set_attr("size", end_offset)?;
-        Ok(())
+        Ok(data.len())
     }
 }
 
@@ -458,25 +463,29 @@ impl NightshiftFuse {
         ino: u64,
         _fh: u64,
         offset: i64,
-        data: &[u8],
+        mut data: &[u8],
         _write_flags: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<u32> {
+        let size = data.len();
         let offset = offset as u64;
-        self.db.truncate_blocks(ino, offset)?;
-        match self.db.update_block(ino, offset, data) {
-            Ok(_) => {
-                log::debug!("block modified");
-                Ok(data.len() as u32)
+        while data.len() > 0 {
+            match self.db.update_block(ino, offset, data) {
+                Ok(written) => {
+                    data = &data[written..];
+                    log::debug!("block modified");
+                }
+                Err(Error::NotFound) => break,
+                Err(e) => return Err(e),
             }
-            Err(Error::NotFound) => {
-                log::debug!("block not modified, creating new block");
-                self.db.create_block(ino, offset, data)?;
-                Ok(data.len() as u32)
-            }
-            Err(e) => Err(e),
         }
+        while data.len() > 0 {
+            log::debug!("creating new block");
+            let written = self.db.create_block(ino, offset, data)?;
+            data = &data[written..];
+        }
+        Ok(size as u32)
     }
 }
 
