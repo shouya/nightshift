@@ -191,6 +191,22 @@ impl NightshiftDB {
         Ok(())
     }
 
+    fn get_block_at(&mut self, ino: u64, offset: u64) -> Result<Block> {
+        let mut stmt = self.db.prepare_cached(
+            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
+        )?;
+        let block = stmt.query_row(params![ino, offset, offset], |row| {
+            Ok(Block {
+                ino,
+                offset: row.get(0)?,
+                end_offset: row.get(1)?,
+                size: row.get(2)?,
+                data: row.get(3)?,
+            })
+        })?;
+        Ok(block)
+    }
+
     fn truncate_blocks(&mut self, ino: u64, offset: u64) -> Result<usize> {
         let mut stmt = self
             .db
@@ -203,19 +219,7 @@ impl NightshiftDB {
         // 0 - 4096
         // 4096 - 8192
         // 5000
-
-        let mut stmt = self.db.prepare_cached(
-            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
-        )?;
-        let mut block = stmt.query_row(params![ino, offset, offset], |row| {
-            Ok(Block {
-                ino,
-                offset: row.get(0)?,
-                end_offset: row.get(1)?,
-                size: row.get(2)?,
-                data: row.get(3)?,
-            })
-        })?;
+        let mut block = self.get_block_at(ino, offset)?;
 
         let internal_offset = offset - block.offset;
         block.data.truncate(internal_offset as usize);
@@ -424,6 +428,21 @@ impl NightshiftFuse {
         Ok(())
     }
 
+    fn read_impl(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        let mut block = self.db.get_block_at(ino, offset as u64)?;
+        block.data.truncate(size as usize);
+        Ok(block.data)
+    }
+
     fn write_impl(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -592,6 +611,29 @@ impl fuser::Filesystem for NightshiftFuse {
         }
     }
 
+    // fn read(
+    //     &mut self,
+    //     req: &fuser::Request<'_>,
+    //     ino: u64,
+    //     fh: u64,
+    //     offset: i64,
+    //     size: u32,
+    //     flags: i32,
+    //     lock_owner: Option<u64>,
+    //     reply: fuser::ReplyData,
+    // ) {
+    //     log::debug!("read(ino={}, offset={}, size={}", ino, offset, size);
+    //     // let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
+    //     // log::debug!("read: {:?}", res);
+
+    //     // match res {
+    //     //     Ok(data) => reply.data(&data),
+    //     //     Err(Error::NotFound) => reply.data(&[]),
+    //     //     Err(e) => reply.error(e.errno()),
+    //     // }
+    //     reply.error(libc::ENOSYS)
+    // }
+
     fn write(
         &mut self,
         req: &fuser::Request<'_>,
@@ -617,7 +659,7 @@ impl fuser::Filesystem for NightshiftFuse {
 
 fn main() -> anyhow::Result<()> {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Debug)
         .init()
         .context("unable to install logging")?;
 
