@@ -64,6 +64,25 @@ struct ListDirEntry<'n> {
     offset: i64,
 }
 
+struct Block {
+    ino: u64,
+    offset: u64,
+    end_offset: u64,
+    size: u32,
+    data: Vec<u8>,
+}
+
+impl std::fmt::Debug for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Block")
+            .field("ino", &self.ino)
+            .field("offset", &self.offset)
+            .field("end_offset", &self.end_offset)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
 struct NightshiftDB {
     db: rusqlite::Connection,
 }
@@ -169,6 +188,51 @@ impl NightshiftDB {
         }
         Ok(())
     }
+
+    fn truncate_blocks(&mut self, ino: u64, offset: u64) -> Result<usize> {
+        let mut stmt = self
+            .db
+            .prepare_cached("DELETE FROM block WHERE ino = ? AND offset > ?")?;
+        let deleted = stmt.execute(params![ino, offset])?;
+        Ok(deleted)
+    }
+
+    fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<()> {
+        // 0 - 4096
+        // 4096 - 8192
+        // 5000
+
+        let mut stmt = self.db.prepare_cached(
+            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? <= end_offset",
+        )?;
+        let mut block = stmt.query_row(params![ino, offset, offset], |row| {
+            Ok(Block {
+                ino,
+                offset: row.get(0)?,
+                end_offset: row.get(1)?,
+                size: row.get(2)?,
+                data: row.get(3)?,
+            })
+        })?;
+
+        let internal_offset = offset - block.offset;
+        block.data.truncate(internal_offset as usize);
+        block.data.extend_from_slice(data);
+        block.size = block.data.len() as u32;
+        block.end_offset = block.offset + block.size as u64;
+        log::info!("updated block {:?}", block);
+
+        Ok(())
+    }
+
+    fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<()> {
+        let end_offset = offset + data.len() as u64;
+        let mut stmt = self
+            .db
+            .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
+        stmt.execute(params![ino, offset, end_offset, data.len(), data])?;
+        Ok(())
+    }
 }
 
 struct NightshiftFuse {
@@ -192,10 +256,10 @@ impl NightshiftFuse {
                     ctime: now,
                     crtime: now,
                     kind: fuser::FileType::Directory,
-                    perm: 0766u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
+                    perm: 0o755u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
                     nlink: 0,
-                    uid: 1000,
-                    gid: 1000,
+                    uid: 1000, // TODO get real user
+                    gid: 1000, // TODO get real group
                     rdev: 0,
                     blksize: 4096,
                     flags: 0,
@@ -281,7 +345,7 @@ impl NightshiftFuse {
         umask: u32,
         rdev: u32,
     ) -> Result<FileAttr> {
-        log::debug!("mode is o={:#o} d={} h={:#x}", mode, mode, mode);
+        log::info!("mknod mode is o={:#o} umask={:#o}", mode, umask);
         let kind = FileType::from_mode(mode).ok_or_else(|| Error::InvalidArgument)?;
         let now = SystemTime::now();
 
@@ -294,8 +358,8 @@ impl NightshiftFuse {
             ctime: now,
             crtime: now,
             kind: kind.into(),
-            perm: 0766u16 & umask as u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-            nlink: 0,
+            perm: (mode & !umask) as u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
+            nlink: 1,
             uid: req.uid(),
             gid: req.gid(),
             rdev,
@@ -313,20 +377,21 @@ impl NightshiftFuse {
         req: &fuser::Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         umask: u32,
     ) -> Result<FileAttr> {
+        log::info!("mkdir mode is {:#o} umask is {:#}", mode, umask);
         let now = SystemTime::now();
         let mut attr = FileAttr {
             ino: 0,
-            size: 0,
-            blocks: 0,
+            size: 4096,
+            blocks: 1,
             atime: now,
             mtime: now,
             ctime: now,
             crtime: now,
             kind: fuser::FileType::Directory,
-            perm: 0755u16 & umask as u16, // TODO probably bad
+            perm: (mode & !umask) as u16, // TODO probably bad
             nlink: 0,
             uid: req.uid(),
             gid: req.gid(),
@@ -346,15 +411,42 @@ impl NightshiftFuse {
         self.db.list_dir(ino, offset, iter)?;
         Ok(())
     }
+
+    fn write_impl(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+    ) -> Result<u32> {
+        let offset = offset as u64;
+        dbg!(self.db.truncate_blocks(ino, offset)?);
+        match self.db.update_block(ino, offset, data) {
+            Ok(_) => {
+                log::debug!("block modified");
+                Ok(data.len() as u32)
+            }
+            Err(e) if e == Error::NotFound => {
+                log::debug!("block not modified, creating new block");
+                self.db.create_block(ino, offset, data)?;
+                Ok(data.len() as u32)
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 impl fuser::Filesystem for NightshiftFuse {
     fn init(
         &mut self,
         _req: &fuser::Request<'_>,
-        _config: &mut fuser::KernelConfig,
+        config: &mut fuser::KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
-        log::info!("called");
+        config.set_max_write(4096);
         match self.ensure_root_exists() {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -484,6 +576,28 @@ impl fuser::Filesystem for NightshiftFuse {
 
         match res {
             Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn write(
+        &mut self,
+        req: &fuser::Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        write_flags: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        log::debug!("write(ino={}, offset={}, data_len={}", ino, offset, data.len());
+        let res = self.write_impl(req, ino, fh, offset, data, write_flags, flags, lock_owner);
+        log::debug!("write: {:?}", res);
+
+        match res {
+            Ok(written) => reply.written(written),
             Err(e) => reply.error(e.errno()),
         }
     }

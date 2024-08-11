@@ -27,3 +27,13 @@ CREATE TABLE dir_entry (
 );
 
 CREATE INDEX entry_parent_ino_name_idx ON dir_entry (parent_ino, name);
+
+CREATE TABLE block (
+    ino INTEGER NOT NULL,
+    offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    data BLOB NOT NULL
+);
+
+CREATE INDEX block_ino_offsets_idx ON block (ino, offset, end_offset);
