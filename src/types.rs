@@ -25,9 +25,9 @@ impl FileType {
     }
 }
 
-impl Into<u8> for FileType {
-    fn into(self) -> u8 {
-        self as u8
+impl From<FileType> for u8 {
+    fn from(val: FileType) -> Self {
+        val as u8
     }
 }
 
@@ -62,9 +62,9 @@ impl From<fuser::FileType> for FileType {
     }
 }
 
-impl Into<fuser::FileType> for FileType {
-    fn into(self) -> fuser::FileType {
-        match self {
+impl From<FileType> for fuser::FileType {
+    fn from(val: FileType) -> Self {
+        match val {
             FileType::NamedPipe => fuser::FileType::NamedPipe,
             FileType::CharDevice => fuser::FileType::CharDevice,
             FileType::BlockDevice => fuser::FileType::BlockDevice,

@@ -9,12 +9,11 @@ pub enum Error {
 
 impl Error {
     pub fn errno(self) -> libc::c_int {
-        let var_name = match self {
+        match self {
             Error::NotFound => libc::ENOENT,
             Error::InvalidArgument => libc::EINVAL,
             Error::Other(_) => libc::ENOTSUP, // Need better code
-        };
-        var_name
+        }
     }
 }
 
