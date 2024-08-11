@@ -448,9 +448,20 @@ impl NightshiftFuse {
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let mut block = self.db.get_block_at(ino, offset as u64)?;
-        block.data.truncate(size as usize);
-        Ok(block.data)
+        let mut offset = offset as u64;
+        let mut buf = Vec::with_capacity(size as usize);
+
+        while buf.len() < size as usize {
+            match self.db.get_block_at(ino, offset as u64) {
+                Ok(block) => {
+                    buf.extend_from_slice(&block.data);
+                    offset += block.size as u64;
+                }
+                Err(Error::NotFound) => break, // EOF reached,
+                Err(e) => return Err(e),
+            };
+        }
+        Ok(buf)
     }
 
     fn write_impl(
