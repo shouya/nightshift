@@ -11,3 +11,6 @@ log = "0.4.22"
 rusqlite = "0.32.1"
 signal-hook = "0.3.17"
 simple_logger = "5.0.0"
+
+[profile.release]
+debug = true

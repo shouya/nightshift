@@ -5,6 +5,11 @@ mod types;
 
 use std::{
     ffi::OsStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
     time::{self, Duration, SystemTime},
 };
 
@@ -226,6 +231,7 @@ impl NightshiftDB {
         block.data.extend_from_slice(data);
         block.size = block.data.len() as u32;
         block.end_offset = block.offset + block.size as u64;
+        self.set_attr("size", block.end_offset)?;
 
         let mut stmt = self
             .db
@@ -243,10 +249,13 @@ impl NightshiftDB {
 
     fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<()> {
         let end_offset = offset + data.len() as u64;
-        let mut stmt = self
-            .db
-            .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
-        stmt.execute(params![ino, offset, end_offset, data.len(), data])?;
+        {
+            let mut stmt = self
+                .db
+                .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
+            stmt.execute(params![ino, offset, end_offset, data.len(), data])?;
+        }
+        self.set_attr("size", end_offset)?;
         Ok(())
     }
 }
@@ -611,28 +620,31 @@ impl fuser::Filesystem for NightshiftFuse {
         }
     }
 
-    // fn read(
-    //     &mut self,
-    //     req: &fuser::Request<'_>,
-    //     ino: u64,
-    //     fh: u64,
-    //     offset: i64,
-    //     size: u32,
-    //     flags: i32,
-    //     lock_owner: Option<u64>,
-    //     reply: fuser::ReplyData,
-    // ) {
-    //     log::debug!("read(ino={}, offset={}, size={}", ino, offset, size);
-    //     // let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
-    //     // log::debug!("read: {:?}", res);
+    fn open(&mut self, _req: &fuser::Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        reply.opened(1337, 0)
+    }
 
-    //     // match res {
-    //     //     Ok(data) => reply.data(&data),
-    //     //     Err(Error::NotFound) => reply.data(&[]),
-    //     //     Err(e) => reply.error(e.errno()),
-    //     // }
-    //     reply.error(libc::ENOSYS)
-    // }
+    fn read(
+        &mut self,
+        req: &fuser::Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        flags: i32,
+        lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        log::debug!("read(ino={}, offset={}, size={}", ino, offset, size);
+        let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
+        log::debug!("read: {:?}", res);
+
+        match res {
+            Ok(data) => reply.data(&data),
+            Err(Error::NotFound) => reply.data(&[]),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
 
     fn write(
         &mut self,
@@ -675,16 +687,12 @@ fn main() -> anyhow::Result<()> {
 
     let mount = fuser::spawn_mount2(fs, "mnt-target", &[]).context("unable to create mount")?;
 
-    let mut signals = Signals::new([SIGTERM, SIGINT])?;
-    loop {
-        for signal in signals.pending() {
-            match signal as libc::c_int {
-                SIGINT | SIGTERM => {
-                    drop(mount);
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
+    let term = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
+    while !term.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(100));
     }
+    drop(mount);
+    Ok(())
 }
