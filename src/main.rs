@@ -6,6 +6,7 @@ mod types;
 use std::{
     cmp,
     ffi::OsStr,
+    os::unix::ffi::OsStrExt,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -183,7 +184,7 @@ impl NightshiftDB {
             let name: Vec<u8> = row.get(1)?;
             let entry = ListDirEntry {
                 ino: row.get(0)?,
-                name: unsafe { OsStr::from_encoded_bytes_unchecked(&name) },
+                name: OsStr::from_bytes(&name),
                 kind: import_kind(row.get(2)?),
                 offset: row.get(0)?,
             };
