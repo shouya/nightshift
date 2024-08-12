@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS block (
     ino INTEGER NOT NULL,
     offset INTEGER NOT NULL,
     end_offset INTEGER NOT NULL,
-    size INTEGER NOT NULL,
     data BLOB NOT NULL
 );
 

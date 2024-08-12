@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 use std::{
+    cmp,
     ffi::OsStr,
     time::{Duration, SystemTime},
 };
@@ -11,7 +12,8 @@ use crate::errors::{Error, Result};
 use crate::types::FileType;
 use crate::{database::DatabaseOps, time::TimeSpec};
 
-static DURATION: &Duration = &Duration::from_secs(1);
+const DURATION: Duration = Duration::from_secs(0);
+const POSIX_BLOCK_SIZE: u32 = 512;
 
 pub struct FuseDriver {
     pub db: DatabaseOps,
@@ -137,7 +139,7 @@ impl FuseDriver {
             uid: req.uid(),
             gid: req.gid(),
             rdev,
-            blksize: crate::database::BLOCK_SIZE,
+            blksize: POSIX_BLOCK_SIZE,
             flags: 0,
         };
         // TODO transaction
@@ -229,19 +231,18 @@ impl FuseDriver {
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let mut offset = offset as u64;
-        let mut buf = Vec::with_capacity(size as usize);
+        let attr = self.db.lookup_inode(ino)?;
+        let offset = offset as u64;
+        let remaining = attr.size - offset;
+        let cap = cmp::min(size as u64, remaining) as usize;
+        let mut buf = Vec::with_capacity(cap);
 
-        while buf.len() < size as usize {
-            match self.db.get_block_at(ino, offset) {
-                Ok(block) => {
-                    buf.extend_from_slice(&block.data);
-                    offset += block.size as u64;
-                }
-                Err(Error::NotFound) => break, // EOF reached,
-                Err(e) => return Err(e),
-            };
-        }
+        self.db.iter_blocks_from(ino, offset, |block| {
+            block.copy_into(&mut buf);
+            buf.len() < buf.capacity()
+        })?;
+        dbg!(buf.len(), buf.capacity());
+
         Ok(buf)
     }
 
@@ -282,8 +283,9 @@ impl FuseDriver {
             data = &data[written as usize..];
             offset += written;
             attr.size += written;
-            attr.blocks += 1;
         }
+
+        attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
 
         self.db.set_attr(ino, "size", attr.size)?;
         self.db.set_attr(ino, "blocks", attr.blocks)?;
@@ -326,7 +328,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("lookup: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -337,7 +339,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("getattr: {:?}", res);
 
         match res {
-            Ok(attr) => reply.attr(DURATION, &attr),
+            Ok(attr) => reply.attr(&DURATION, &attr),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -387,7 +389,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("setattr: {:?}", res);
 
         match res {
-            Ok(attr) => reply.attr(DURATION, &attr),
+            Ok(attr) => reply.attr(&DURATION, &attr),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -414,7 +416,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("mknod: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -425,7 +427,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("link: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }
@@ -461,7 +463,7 @@ impl fuser::Filesystem for FuseDriver {
         log::trace!("mkdir: {:?}", res);
 
         match res {
-            Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Ok(attr) => reply.entry(&DURATION, &attr, 0),
             Err(e) => reply.error(e.errno()),
         }
     }

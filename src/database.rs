@@ -23,8 +23,47 @@ pub struct Block {
     pub ino: u64,
     pub offset: u64,
     pub end_offset: u64,
-    pub size: u32,
-    pub data: Vec<u8>,
+    pub data: Vec<u8>, // UNCOMPRESSED ALWAYS
+}
+
+impl Block {
+    fn new(ino: u64, offset: u64, size: u32) -> Block {
+        Block {
+            ino,
+            offset,
+            end_offset: offset + u64::from(size),
+            data: Vec::new(),
+        }
+    }
+
+    fn available(&self) -> u32 {
+        let block_size = self.end_offset - self.offset;
+        u32::try_from(block_size - self.data.len() as u64).expect("block size overflow")
+    }
+
+    fn consume(&mut self, data: &[u8]) -> u64 {
+        let avail = self.available();
+        let data_len = u32::try_from(data.len()).expect("data size overflow");
+        let max_write = cmp::min(avail, data_len) as usize;
+        self.data.extend_from_slice(&data[..max_write]);
+        u64::try_from(max_write).expect("written overflow")
+    }
+
+    fn write_at(&mut self, inode_offset: u64, data: &[u8]) -> (u64, i64) {
+        let start_len = self.data.len();
+        let rel_offset = inode_offset - self.offset;
+        self.data.truncate(rel_offset as usize);
+        let written = self.consume(data);
+        let diff = self.data.len() as i64 - start_len as i64;
+        (written, diff)
+    }
+
+    pub fn copy_into(&self, dest: &mut Vec<u8>) -> usize {
+        let remaining = dest.capacity() - dest.len();
+        let max_write = cmp::min(remaining, self.data.len());
+        dest.extend_from_slice(&self.data[..max_write]);
+        max_write
+    }
 }
 
 impl std::fmt::Debug for Block {
@@ -33,7 +72,7 @@ impl std::fmt::Debug for Block {
             .field("ino", &self.ino)
             .field("offset", &self.offset)
             .field("end_offset", &self.end_offset)
-            .field("size", &self.size)
+            .field("data.len()", &self.data.len())
             .finish()
     }
 }
@@ -181,58 +220,61 @@ impl DatabaseOps {
 
     pub fn get_block_at(&mut self, ino: u64, offset: u64) -> Result<Block> {
         let mut stmt = self.db.prepare_cached(
-            "SELECT offset, end_offset, size, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
+            "SELECT offset, end_offset, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
         )?;
         let block = stmt.query_row(params![ino, offset, offset], |row| {
             Ok(Block {
                 ino,
                 offset: row.get(0)?,
                 end_offset: row.get(1)?,
-                size: row.get(2)?,
-                data: row.get(3)?,
+                data: row.get(2)?,
             })
         })?;
         Ok(block)
     }
 
+    pub fn iter_blocks_from(&mut self, ino: u64, offset: u64, mut iter: impl FnMut(Block) -> bool) -> Result<()> {
+        let mut stmt = self
+            .db
+            .prepare_cached("SELECT offset, end_offset, data FROM block WHERE ino = ? AND ? >= offset")?;
+        let mut rows = stmt.query(params![ino, offset])?;
+        while let Some(row) = rows.next()? {
+            let block = Block {
+                ino,
+                offset: row.get(0)?,
+                end_offset: row.get(1)?,
+                data: row.get(2)?,
+            };
+            let more = iter(block);
+            if !more {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(u64, i64)> {
         let mut block = self.get_block_at(ino, offset)?;
-        let start_size = block.data.len() as i64;
-
-        let internal_offset = (offset - block.offset) as usize;
-        let internal_available = block.size as usize - internal_offset;
-        let write_size = cmp::min(internal_available, data.len());
-        let internal_end_offset = (internal_offset + write_size) as usize;
-        let data = &data[..write_size as usize];
-
-        block.data.resize(internal_end_offset, 0);
-        block.data[internal_offset..internal_end_offset].copy_from_slice(data);
-        block.end_offset = block.offset + block.size as u64;
+        let (written, diff) = block.write_at(offset, data);
 
         let mut stmt = self
             .db
-            .prepare_cached("UPDATE block SET end_offset = ?, size = ?, data = ? WHERE ino = ? AND offset = ?")?;
-        stmt.execute(params![
-            block.end_offset,
-            block.size,
-            block.data,
-            block.ino,
-            block.offset
-        ])?;
+            .prepare_cached("UPDATE block SET data = ? WHERE ino = ? AND offset = ?")?;
+        stmt.execute(params![block.data, block.ino, block.offset])?;
 
-        Ok((write_size as u64, block.data.len() as i64 - start_size))
+        Ok((written, diff))
     }
 
     pub fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<u64> {
-        let end_offset = offset + BLOCK_SIZE as u64;
-        let write_size = cmp::min(data.len(), BLOCK_SIZE as usize);
+        let mut block = Block::new(ino, offset, BLOCK_SIZE);
+        let written = block.consume(data);
         {
             let mut stmt = self
                 .db
-                .prepare_cached("INSERT INTO block (ino, offset, end_offset, size, data) VALUES (?, ?, ?, ?, ?)")?;
-            stmt.execute(params![ino, offset, end_offset, BLOCK_SIZE, &data[..write_size]])?;
+                .prepare_cached("INSERT INTO block (ino, offset, end_offset, data) VALUES (?, ?, ?, ?)")?;
+            stmt.execute(params![block.ino, block.offset, block.end_offset, &block.data])?;
         }
-        Ok(write_size as u64)
+        Ok(written)
     }
 
     pub fn remove_blocks(&mut self, ino: u64) -> Result<()> {
