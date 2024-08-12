@@ -52,7 +52,7 @@ impl Block {
     fn write_at(&mut self, inode_offset: u64, data: &[u8]) -> (u64, i64) {
         let start_len = self.data.len();
         let rel_offset = inode_offset - self.offset;
-        self.data.truncate(rel_offset as usize);
+        self.data.resize(rel_offset as usize, 0);
         let written = self.consume(data);
         let diff = self.data.len() as i64 - start_len as i64;
         (written, diff)
@@ -311,4 +311,44 @@ impl RowCounter {
         self.c += 1;
         x
     }
+}
+
+#[test]
+fn test_block() {
+    let b = Block::new(37, 4096, 1024);
+    assert_eq!(b.ino, 37);
+    assert_eq!(b.offset, 4096);
+    assert_eq!(b.end_offset, 4096 + 1024);
+    assert_eq!(b.available(), 1024);
+}
+
+#[test]
+fn test_block_consume() {
+    let mut b = Block::new(37, 0, 10);
+    assert_eq!(b.consume(&[0; 5]), 5);
+    assert_eq!(b.consume(&[1; 10]), 5);
+    assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+}
+
+#[test]
+fn test_block_write_at() {
+    let mut b = Block::new(0, 100, 10);
+    assert_eq!(b.write_at(100, &[1; 5]), (5, 5));
+    assert_eq!(b.data, vec![1; 5]);
+
+    let mut b = Block::new(0, 100, 10);
+    assert_eq!(b.write_at(105, &[1; 5]), (5, 10));
+    assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+}
+
+#[test]
+fn test_block_copy_into() {
+    let mut b = Block::new(0, 100, 10);
+    b.data = vec![1; 10];
+
+    let mut buf = Vec::with_capacity(5);
+    assert_eq!(b.copy_into(&mut buf), 5);
+
+    let mut buf = Vec::with_capacity(15);
+    assert_eq!(b.copy_into(&mut buf), 10);
 }
