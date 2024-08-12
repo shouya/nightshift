@@ -23,7 +23,7 @@ use simple_logger::SimpleLogger;
 
 fn main() -> anyhow::Result<()> {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Trace)
         .init()
         .context("unable to install logging")?;
 

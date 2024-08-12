@@ -146,6 +146,28 @@ impl FuseDriver {
         Ok(attr)
     }
 
+    fn link_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr) -> Result<FileAttr> {
+        let mut attr = self.db.lookup_inode(ino)?;
+        attr.nlink += 1;
+        self.db.create_dir_entry(newparent, newname, ino)?;
+        self.db.set_attr(ino, "nlink", attr.nlink)?;
+        Ok(attr)
+    }
+
+    fn unlink_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
+        let ino = self.db.lookup_dir_entry(parent, name)?;
+        let mut attr = self.db.lookup_inode(ino)?;
+        attr.nlink -= 1;
+        if attr.nlink > 0 {
+            self.db.set_attr(ino, "nlink", attr.nlink)?;
+        } else {
+            self.db.remove_blocks(ino)?;
+            self.db.remove_inode(ino)?;
+        }
+        self.db.remove_dir_entry(parent, name)?;
+        Ok(())
+    }
+
     fn mkdir_impl(
         &mut self,
         req: &fuser::Request<'_>,
@@ -393,6 +415,28 @@ impl fuser::Filesystem for FuseDriver {
 
         match res {
             Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn link(&mut self, req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr, reply: fuser::ReplyEntry) {
+        log::trace!("link(ino={}, newparent={}, newname={:?}", ino, newparent, newname);
+        let res = self.link_impl(req, ino, newparent, newname);
+        log::trace!("link: {:?}", res);
+
+        match res {
+            Ok(attr) => reply.entry(DURATION, &attr, 0),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn unlink(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        log::trace!("unlink(parent={}, name={:?}", parent, name);
+        let res = self.unlink_impl(req, parent, name);
+        log::trace!("unlink: {:?}", res);
+
+        match res {
+            Ok(_) => reply.ok(),
             Err(e) => reply.error(e.errno()),
         }
     }

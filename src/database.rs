@@ -13,10 +13,10 @@ use crate::types::FileType;
 pub const BLOCK_SIZE: u32 = 4096 * 4;
 
 pub struct ListDirEntry<'n> {
+    pub offset: i64,
     pub ino: u64,
     pub name: &'n OsStr,
     pub kind: fuser::FileType,
-    pub offset: i64,
 }
 
 pub struct Block {
@@ -162,15 +162,16 @@ impl DatabaseOps {
     }
 
     pub fn list_dir(&mut self, parent_ino: u64, offset: i64, mut iter: impl FnMut(ListDirEntry) -> bool) -> Result<()> {
+        dbg!(parent_ino, offset);
         let mut stmt = self.db.prepare_cached(include_str!("queries/list-dir.sql"))?;
         let mut rows = stmt.query(params![parent_ino, offset])?;
         while let Some(row) = rows.next()? {
-            let name: Vec<u8> = row.get(1)?;
+            let name: Vec<u8> = row.get(2)?;
             let entry = ListDirEntry {
-                ino: row.get(0)?,
-                name: OsStr::from_bytes(&name),
-                kind: import_kind(row.get(2)?),
                 offset: row.get(0)?,
+                ino: row.get(1)?,
+                name: OsStr::from_bytes(&name),
+                kind: import_kind(row.get(3)?),
             };
             if !iter(entry) {
                 break;
@@ -193,14 +194,6 @@ impl DatabaseOps {
             })
         })?;
         Ok(block)
-    }
-
-    pub fn truncate_blocks(&mut self, ino: u64, offset: u64) -> Result<usize> {
-        let mut stmt = self
-            .db
-            .prepare_cached("DELETE FROM block WHERE ino = ? AND offset > ?")?;
-        let deleted = stmt.execute(params![ino, offset])?;
-        Ok(deleted)
     }
 
     pub fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(u64, i64)> {
@@ -241,6 +234,12 @@ impl DatabaseOps {
             stmt.execute(params![ino, offset, end_offset, BLOCK_SIZE, &data[..write_size]])?;
         }
         Ok(write_size as u64)
+    }
+
+    pub fn remove_blocks(&mut self, ino: u64) -> Result<()> {
+        let mut stmt = self.db.prepare_cached("DELETE FROM block WHERE ino = ?")?;
+        stmt.execute(params![ino])?;
+        Ok(())
     }
 
     pub fn rename_entry(&mut self, parent: u64, name: &OsStr, new_parent: u64, new_name: &OsStr) -> Result<()> {
