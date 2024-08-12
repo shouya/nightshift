@@ -27,13 +27,32 @@ pub struct Block {
 }
 
 impl Block {
-    fn new(ino: u64, offset: u64, size: u32) -> Block {
+    fn empty(ino: u64, offset: u64, size: u32) -> Block {
         Block {
             ino,
             offset,
             end_offset: offset + u64::from(size),
             data: Vec::new(),
         }
+    }
+
+    fn from_compressed(ino: u64, offset: u64, end_offset: u64, compressed_data: Vec<u8>) -> Block {
+        let mut b = Block {
+            ino,
+            offset,
+            end_offset,
+            data: vec![0u8; BLOCK_SIZE as usize],
+        };
+        let n = lz4_flex::decompress_into(&compressed_data, &mut b.data).expect("lz4 decompress output too small");
+        b.data.truncate(n);
+        b
+    }
+
+    pub fn compress_into<'d>(&self, dest: &'d mut Vec<u8>) -> &'d [u8] {
+        let max_size = lz4_flex::block::get_maximum_output_size(self.data.len());
+        dest.resize(max_size, 0);
+        let written = lz4_flex::compress_into(&self.data, dest).expect("lz4 compress output too small");
+        &dest[..written]
     }
 
     fn available(&self) -> u32 {
@@ -79,13 +98,17 @@ impl std::fmt::Debug for Block {
 
 pub struct DatabaseOps {
     db: rusqlite::Connection,
+    compress_buffer: Vec<u8>,
 }
 
 impl DatabaseOps {
     pub fn open(path: &str) -> anyhow::Result<Self> {
         let db = rusqlite::Connection::open(path)?;
         db.execute_batch(include_str!("queries/schema.sql")).context("schema")?;
-        Ok(DatabaseOps { db })
+        Ok(DatabaseOps {
+            db,
+            compress_buffer: Vec::new(),
+        })
     }
 
     pub fn lookup_inode(&mut self, ino: u64) -> Result<fuser::FileAttr> {
@@ -223,12 +246,7 @@ impl DatabaseOps {
             "SELECT offset, end_offset, data FROM block WHERE ino = ? AND ? >= offset AND ? < end_offset",
         )?;
         let block = stmt.query_row(params![ino, offset, offset], |row| {
-            Ok(Block {
-                ino,
-                offset: row.get(0)?,
-                end_offset: row.get(1)?,
-                data: row.get(2)?,
-            })
+            Ok(Block::from_compressed(ino, row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
         Ok(block)
     }
@@ -239,12 +257,7 @@ impl DatabaseOps {
             .prepare_cached("SELECT offset, end_offset, data FROM block WHERE ino = ? AND offset >= ?")?;
         let mut rows = stmt.query(params![ino, offset])?;
         while let Some(row) = rows.next()? {
-            let block = Block {
-                ino,
-                offset: row.get(0)?,
-                end_offset: row.get(1)?,
-                data: row.get(2)?,
-            };
+            let block = Block::from_compressed(ino, row.get(0)?, row.get(1)?, row.get(2)?);
             let more = iter(block);
             if !more {
                 break;
@@ -256,24 +269,26 @@ impl DatabaseOps {
     pub fn update_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(u64, i64)> {
         let mut block = self.get_block_at(ino, offset)?;
         let (written, diff) = block.write_at(offset, data);
+        let compressed_data = block.compress_into(&mut self.compress_buffer);
 
         let mut stmt = self
             .db
             .prepare_cached("UPDATE block SET data = ? WHERE ino = ? AND offset = ?")?;
-        stmt.execute(params![block.data, block.ino, block.offset])?;
+        stmt.execute(params![compressed_data, block.ino, block.offset])?;
 
         Ok((written, diff))
     }
 
     pub fn create_block(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<u64> {
-        let mut block = Block::new(ino, offset, BLOCK_SIZE);
+        let mut block = Block::empty(ino, offset, BLOCK_SIZE);
         let written = block.consume(data);
-        {
-            let mut stmt = self
-                .db
-                .prepare_cached("INSERT INTO block (ino, offset, end_offset, data) VALUES (?, ?, ?, ?)")?;
-            stmt.execute(params![block.ino, block.offset, block.end_offset, &block.data])?;
-        }
+        let compressed_data = block.compress_into(&mut self.compress_buffer);
+
+        let mut stmt = self
+            .db
+            .prepare_cached("INSERT INTO block (ino, offset, end_offset, data) VALUES (?, ?, ?, ?)")?;
+        stmt.execute(params![block.ino, block.offset, block.end_offset, compressed_data])?;
+
         Ok(written)
     }
 
@@ -315,7 +330,7 @@ impl RowCounter {
 
 #[test]
 fn test_block() {
-    let b = Block::new(37, 4096, 1024);
+    let b = Block::empty(37, 4096, 1024);
     assert_eq!(b.ino, 37);
     assert_eq!(b.offset, 4096);
     assert_eq!(b.end_offset, 4096 + 1024);
@@ -324,7 +339,7 @@ fn test_block() {
 
 #[test]
 fn test_block_consume() {
-    let mut b = Block::new(37, 0, 10);
+    let mut b = Block::empty(37, 0, 10);
     assert_eq!(b.consume(&[0; 5]), 5);
     assert_eq!(b.consume(&[1; 10]), 5);
     assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
@@ -332,18 +347,18 @@ fn test_block_consume() {
 
 #[test]
 fn test_block_write_at() {
-    let mut b = Block::new(0, 100, 10);
+    let mut b = Block::empty(0, 100, 10);
     assert_eq!(b.write_at(100, &[1; 5]), (5, 5));
     assert_eq!(b.data, vec![1; 5]);
 
-    let mut b = Block::new(0, 100, 10);
+    let mut b = Block::empty(0, 100, 10);
     assert_eq!(b.write_at(105, &[1; 5]), (5, 10));
     assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
 }
 
 #[test]
 fn test_block_copy_into() {
-    let mut b = Block::new(0, 100, 10);
+    let mut b = Block::empty(0, 100, 10);
     b.data = vec![1; 10];
 
     let mut buf = Vec::with_capacity(5);
