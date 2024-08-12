@@ -127,10 +127,38 @@ impl DatabaseOps {
         Ok(())
     }
 
+    pub fn remove_inode(&self, ino: u64) -> Result<()> {
+        let mut stmt = self.db.prepare_cached("DELETE FROM inode WHERE ino = ?")?;
+        let affected = stmt.execute(params![ino])?;
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     pub fn create_dir_entry(&mut self, parent_ino: u64, name: &OsStr, ino: u64) -> Result<()> {
         let mut stmt = self.db.prepare_cached(include_str!("queries/insert-dir-entry.sql"))?;
         stmt.insert(params![parent_ino, name.as_encoded_bytes(), ino])?;
         Ok(())
+    }
+
+    pub fn remove_dir_entry(&mut self, parent_ino: u64, name: &OsStr) -> Result<()> {
+        let mut stmt = self
+            .db
+            .prepare_cached("DELETE FROM dir_entry WHERE parent_ino = ? AND name = ?")?;
+        let affected = stmt.execute(params![parent_ino, name.as_bytes()])?;
+        if affected == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn is_dir_empty(&mut self, ino: u64) -> Result<bool> {
+        let mut stmt = self
+            .db
+            .prepare_cached("SELECT NOT EXISTS(SELECT 1 FROM dir_entry WHERE parent_ino = ?)")?;
+        let empty = stmt.query_row(params![ino], |row| row.get(0))?;
+        Ok(empty)
     }
 
     pub fn list_dir(&mut self, parent_ino: u64, offset: i64, mut iter: impl FnMut(ListDirEntry) -> bool) -> Result<()> {
@@ -213,6 +241,14 @@ impl DatabaseOps {
             stmt.execute(params![ino, offset, end_offset, BLOCK_SIZE, &data[..write_size]])?;
         }
         Ok(write_size as u64)
+    }
+
+    pub fn rename_entry(&mut self, parent: u64, name: &OsStr, new_parent: u64, new_name: &OsStr) -> Result<()> {
+        let mut stmt = self
+            .db
+            .prepare_cached("UPDATE dir_entry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?")?;
+        stmt.execute(params![new_parent, new_name.as_bytes(), parent, name.as_bytes()])?;
+        Ok(())
     }
 }
 

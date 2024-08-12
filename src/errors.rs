@@ -2,6 +2,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    NotEmpty,
     NotFound,
     InvalidArgument,
     Other(String),
@@ -10,6 +11,7 @@ pub enum Error {
 impl Error {
     pub fn errno(self) -> libc::c_int {
         match self {
+            Error::NotEmpty => libc::ENOTEMPTY,
             Error::NotFound => libc::ENOENT,
             Error::InvalidArgument => libc::EINVAL,
             Error::Other(_) => libc::ENOTSUP, // Need better code
@@ -29,6 +31,7 @@ impl From<rusqlite::Error> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::NotEmpty => write!(f, "Not Empty"),
             Error::NotFound => write!(f, "Not Found"),
             Error::InvalidArgument => write!(f, "Invalid Argument"),
             Error::Other(msg) => write!(f, "Other: {}", msg),
@@ -36,16 +39,4 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-
-    fn description(&self) -> &str {
-        "description() is deprecated; use Display"
-    }
-
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        self.source()
-    }
-}
+impl std::error::Error for Error {}

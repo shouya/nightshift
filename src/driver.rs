@@ -178,6 +178,17 @@ impl FuseDriver {
         Ok(attr)
     }
 
+    fn rmdir_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
+        let ino = self.db.lookup_dir_entry(parent, name)?;
+        let empty = self.db.is_dir_empty(ino)?;
+        if !empty {
+            return Err(Error::NotEmpty);
+        }
+        self.db.remove_inode(ino)?;
+        self.db.remove_dir_entry(parent, name)?;
+        Ok(())
+    }
+
     fn readdir_impl<F>(&mut self, _req: &fuser::Request<'_>, ino: u64, _fh: u64, offset: i64, iter: F) -> Result<()>
     where
         F: FnMut(ListDirEntry) -> bool,
@@ -256,6 +267,18 @@ impl FuseDriver {
         self.db.set_attr(ino, "blocks", attr.blocks)?;
 
         Ok(size as u32)
+    }
+
+    fn rename_impl(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+    ) -> Result<()> {
+        self.db.rename_entry(parent, name, newparent, newname)
     }
 }
 
@@ -399,6 +422,17 @@ impl fuser::Filesystem for FuseDriver {
         }
     }
 
+    fn rmdir(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        log::trace!("rmdir(parent={}, name={:?}", parent, name);
+        let res = self.rmdir_impl(req, parent, name);
+        log::trace!("rmdir: {:?}", res);
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
     fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, mut reply: fuser::ReplyDirectory) {
         log::trace!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
         let res = self.readdir_impl(req, ino, fh, offset, |entry| {
@@ -456,6 +490,32 @@ impl fuser::Filesystem for FuseDriver {
 
         match res {
             Ok(written) => reply.written(written),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn rename(
+        &mut self,
+        req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        log::trace!(
+            "rename(parent={}, name={:?}, newparent={}, newname={:?}",
+            parent,
+            name,
+            newparent,
+            newname
+        );
+        let res = self.rename_impl(req, parent, name, newparent, newname, flags);
+        log::trace!("rename: {:?}", res);
+
+        match res {
+            Ok(_) => reply.ok(),
             Err(e) => reply.error(e.errno()),
         }
     }
