@@ -236,7 +236,7 @@ impl DatabaseOps {
     pub fn iter_blocks_from(&mut self, ino: u64, offset: u64, mut iter: impl FnMut(Block) -> bool) -> Result<()> {
         let mut stmt = self
             .db
-            .prepare_cached("SELECT offset, end_offset, data FROM block WHERE ino = ? AND ? >= offset")?;
+            .prepare_cached("SELECT offset, end_offset, data FROM block WHERE ino = ? AND offset >= ?")?;
         let mut rows = stmt.query(params![ino, offset])?;
         while let Some(row) = rows.next()? {
             let block = Block {

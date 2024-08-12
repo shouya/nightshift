@@ -241,7 +241,6 @@ impl FuseDriver {
             block.copy_into(&mut buf);
             buf.len() < buf.capacity()
         })?;
-        dbg!(buf.len(), buf.capacity());
 
         Ok(buf)
     }
