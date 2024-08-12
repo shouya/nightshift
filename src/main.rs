@@ -16,14 +16,23 @@ use std::{
 };
 
 use anyhow::Context;
+use clap::Parser;
 
 use crate::database::DatabaseOps;
 use crate::driver::FuseDriver;
 use simple_logger::SimpleLogger;
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(short = 'l', long, default_value = "info")]
+    log_level: log::LevelFilter,
+}
+
 fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Trace)
+        .with_level(args.log_level)
         .init()
         .context("unable to install logging")?;
 

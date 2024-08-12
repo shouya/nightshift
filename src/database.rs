@@ -162,7 +162,6 @@ impl DatabaseOps {
     }
 
     pub fn list_dir(&mut self, parent_ino: u64, offset: i64, mut iter: impl FnMut(ListDirEntry) -> bool) -> Result<()> {
-        dbg!(parent_ino, offset);
         let mut stmt = self.db.prepare_cached(include_str!("queries/list-dir.sql"))?;
         let mut rows = stmt.query(params![parent_ino, offset])?;
         while let Some(row) = rows.next()? {
