@@ -102,8 +102,18 @@ pub struct DatabaseOps {
 }
 
 impl DatabaseOps {
-    pub fn open(path: &str) -> anyhow::Result<Self> {
+    pub fn open(path: &str, password: Option<&str>) -> anyhow::Result<Self> {
         let db = rusqlite::Connection::open(path)?;
+        if let Some(password) = password {
+            db.pragma_update(None, "key", password)?;
+            match db.prepare("SELECT count(*) FROM sqlite_master")?.query(params![]) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ffi::ErrorCode::NotADatabase => {
+                    anyhow::bail!("Invalid password");
+                }
+                Err(e) => anyhow::bail!("SQLite error: {e}"),
+            }
+        }
         db.execute_batch(include_str!("queries/schema.sql")).context("schema")?;
         Ok(DatabaseOps {
             db,

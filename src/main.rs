@@ -24,6 +24,8 @@ use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
 struct Args {
+    #[arg(short = 'p', long, default_value = "None")]
+    password: Option<String>,
     #[arg(short = 'l', long, default_value = "info")]
     log_level: log::LevelFilter,
 }
@@ -37,7 +39,7 @@ fn main() -> anyhow::Result<()> {
         .context("unable to install logging")?;
 
     let driver = FuseDriver {
-        db: DatabaseOps::open("foo.db")?,
+        db: DatabaseOps::open("foo.db", args.password.as_deref())?,
     };
 
     let mount = fuser::spawn_mount2(driver, "mnt-target", &[]).context("unable to create mount")?;
