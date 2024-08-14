@@ -1,6 +1,6 @@
 use std::{cmp, ffi::OsStr};
 
-pub const BLOCK_SIZE: u32 = 4096 * 4;
+pub const BLOCK_SIZE: u32 = 4096;
 
 pub struct ListDirEntry<'n> {
     pub offset: i64,

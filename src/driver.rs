@@ -255,7 +255,7 @@ impl FuseDriver {
 
             queries::block::iter_blocks_from(tx, ino, offset, |block| {
                 block.copy_into(&mut buf);
-                buf.len() < buf.capacity()
+                Ok(buf.len() < buf.capacity())
             })?;
 
             Ok(buf)
@@ -278,21 +278,39 @@ impl FuseDriver {
 
         self.db.with_write_tx(|tx| {
             let mut attr = queries::inode::lookup(tx, ino)?;
+            let mut write_offset = offset;
 
-            // Overwrite existing blocks until we get a NotFound error indicating
-            // that there's no more blocks to overwrite. This usually happens when
-            // seek is used or the block is incomplete.
-            while !data.is_empty() {
-                match queries::block::update(tx, ino, offset, data) {
-                    Ok((written, bytes_diff)) => {
-                        data = &data[written as usize..];
-                        offset += written;
-                        attr.size = (attr.size as i64 + bytes_diff) as u64;
-                    }
-                    Err(Error::NotFound) => break,
-                    Err(e) => return Err(e),
+            let mut modified_blocks = Vec::new();
+
+            queries::block::iter_blocks_from(tx, ino, offset, |mut block| {
+                let (written, diff) = block.write_at(write_offset, data);
+                data = &data[written as usize..];
+                write_offset += written;
+                attr.size = (attr.size as i64 + diff) as u64;
+                if written > 0 {
+                    modified_blocks.push(block);
                 }
+                Ok(!data.is_empty())
+            })?;
+
+            for block in modified_blocks {
+                queries::block::update(tx, &block)?;
             }
+
+            // // Overwrite existing blocks until we get a NotFound error indicating
+            // // that there's no more blocks to overwrite. This usually happens when
+            // // seek is used or the block is incomplete.
+            // while !data.is_empty() {
+            //     match queries::block::update(tx, ino, offset, data) {
+            //         Ok((written, bytes_diff)) => {
+            //             data = &data[written as usize..];
+            //             offset += written;
+            //             attr.size = (attr.size as i64 + bytes_diff) as u64;
+            //         }
+            //         Err(Error::NotFound) => break,
+            //         Err(e) => return Err(e),
+            //     }
+            // }
 
             // Write the rest of the data in a new block.
             while !data.is_empty() {
@@ -329,7 +347,7 @@ impl fuser::Filesystem for FuseDriver {
     fn init(
         &mut self,
         _req: &fuser::Request<'_>,
-        config: &mut fuser::KernelConfig,
+        _config: &mut fuser::KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
         // config.set_max_write(crate::database::BLOCK_SIZE).unwrap();
         match self.ensure_root_exists() {

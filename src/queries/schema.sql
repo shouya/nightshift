@@ -42,3 +42,4 @@ CREATE TABLE IF NOT EXISTS block (
 );
 
 CREATE INDEX IF NOT EXISTS block_ino_offsets_idx ON block (ino, offset, end_offset);
+CREATE INDEX IF NOT EXISTS block_offset ON block (offset);

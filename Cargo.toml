@@ -17,5 +17,6 @@ signal-hook = "0.3.17"
 simple_logger = "5.0.0"
 
 [profile.release]
+# debug = true # For `cargo flamegraph`
 strip = true
 lto = "thin"
