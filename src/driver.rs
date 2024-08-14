@@ -16,9 +16,42 @@ use crate::{models::ListDirEntry, queries};
 const DURATION: Duration = Duration::from_secs(0);
 const POSIX_BLOCK_SIZE: u32 = 512;
 
+#[derive(Clone, Copy, Debug)]
+struct OpenFlags {
+    bits: i32,
+    read: bool,
+    write: bool,
+    create: bool,
+    append: bool,
+    truncate: bool,
+    sync: bool,
+}
+
+impl From<i32> for OpenFlags {
+    fn from(flags: i32) -> Self {
+        let read = flags & libc::O_WRONLY == libc::O_RDONLY || flags & libc::O_RDWR == libc::O_RDWR;
+        let write = flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR == libc::O_RDWR;
+        let create = flags & libc::O_CREAT == libc::O_CREAT;
+        let append = flags & libc::O_APPEND == libc::O_APPEND;
+        let truncate = flags & libc::O_TRUNC == libc::O_TRUNC;
+        let sync = flags & libc::O_SYNC == libc::O_SYNC;
+        OpenFlags {
+            bits: flags,
+            read,
+            write,
+            create,
+            append,
+            truncate,
+            sync,
+        }
+    }
+}
+
 struct FileHandle {
     ino: u64,
-    offset: i64,
+    offset: u64,
+    end_offset: u64,
+    flags: OpenFlags,
 }
 
 pub struct FuseDriver {
@@ -249,26 +282,16 @@ impl FuseDriver {
         })
     }
 
-    fn lseek_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, whence: i32) -> Result<i64> {
-        let handle = self.handles.get_mut(fh as usize).ok_or(Error::NotFound)?;
-        match whence {
-            libc::SEEK_SET => {
-                handle.offset = offset;
-            }
-            libc::SEEK_CUR => {
-                handle.offset += offset;
-            }
-            libc::SEEK_END => {
-                self.db.with_read_tx(|tx| {
-                    let attr = queries::inode::lookup(tx, ino)?;
-                    handle.offset = attr.size as i64 + offset;
-                    Ok(())
-                })?;
-            }
-            _ => return Err(Error::InvalidArgument),
-        };
-
-        Ok(handle.offset)
+    fn open_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: OpenFlags) -> Result<(u64, u32)> {
+        let attr = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino))?;
+        let fh = self.handles.insert(FileHandle {
+            ino,
+            offset: 0,
+            end_offset: attr.size,
+            flags,
+        });
+        let fh = u64::try_from(fh).map_err(|_| Error::Overflow)?;
+        Ok((fh, flags.bits as u32))
     }
 
     fn release_impl(
@@ -284,6 +307,32 @@ impl FuseDriver {
         let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
         self.handles.try_remove(fh).ok_or(Error::NotFound)?;
         Ok(())
+    }
+
+    fn lseek_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, whence: i32) -> Result<i64> {
+        let handle = self.handles.get_mut(fh as usize).ok_or(Error::NotFound)?;
+        match whence {
+            libc::SEEK_SET => {
+                handle.offset = u64::try_from(offset).map_err(|_| Error::InvalidArgument)?;
+            }
+            libc::SEEK_CUR => {
+                let mut current_offset = i64::try_from(handle.offset).map_err(|_| Error::InvalidArgument)?;
+                current_offset += offset;
+                handle.offset = u64::try_from(current_offset).map_err(|_| Error::InvalidArgument)?;
+            }
+            libc::SEEK_END => {
+                self.db.with_read_tx(|tx| {
+                    let attr = queries::inode::lookup(tx, ino)?;
+                    let mut end_offset = i64::try_from(attr.size).map_err(|_| Error::InvalidArgument)?;
+                    end_offset += offset;
+                    handle.offset = u64::try_from(end_offset).map_err(|_| Error::InvalidArgument)?;
+                    Ok(())
+                })?;
+            }
+            _ => return Err(Error::InvalidArgument),
+        };
+
+        Ok(i64::try_from(handle.offset).map_err(|_| Error::Overflow)?)
     }
 
     fn read_impl(
@@ -579,9 +628,16 @@ impl fuser::Filesystem for FuseDriver {
         }
     }
 
-    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        let fh = self.handles.insert(FileHandle { ino, offset: 0 });
-        reply.opened(fh as u64, 0);
+    fn open(&mut self, req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
+        let flags = OpenFlags::from(flags);
+        log::trace!("open(ino={}, flags={:?}", ino, flags);
+        let res = self.open_impl(req, ino, flags);
+        log::trace!("open: {:?}", res);
+
+        match res {
+            Ok((fh, flags)) => reply.opened(fh, flags),
+            Err(e) => reply.error(e.errno()),
+        }
     }
 
     fn lseek(
@@ -593,7 +649,10 @@ impl fuser::Filesystem for FuseDriver {
         whence: i32,
         reply: fuser::ReplyLseek,
     ) {
+        log::trace!("lseek(ino={}, fh={}, offset={}, whence={}", ino, fh, offset, whence);
         let res = self.lseek_impl(req, ino, fh, offset, whence);
+        log::trace!("lseek: {:?}", res);
+
         match res {
             Ok(new_offset) => reply.offset(new_offset),
             Err(e) => reply.error(e.errno()),
@@ -610,7 +669,10 @@ impl fuser::Filesystem for FuseDriver {
         flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
+        log::trace!("release(ino={}, fh={}, flush={}", ino, fh, flush);
         let res = self.release_impl(req, ino, fh, flags, lock_owner, flush);
+        log::trace!("release: {:?}", res);
+
         match res {
             Ok(_) => reply.ok(),
             Err(e) => reply.error(e.errno()),
@@ -686,4 +748,72 @@ impl fuser::Filesystem for FuseDriver {
             Err(e) => reply.error(e.errno()),
         }
     }
+}
+
+#[test]
+fn test_open_flags() {
+    let flags = OpenFlags::from(libc::O_RDONLY);
+    assert_eq!(
+        (
+            flags.read,
+            flags.write,
+            flags.create,
+            flags.append,
+            flags.truncate,
+            flags.sync
+        ),
+        (true, false, false, false, false, false)
+    );
+
+    let flags = OpenFlags::from(libc::O_WRONLY);
+    assert_eq!(
+        (
+            flags.read,
+            flags.write,
+            flags.create,
+            flags.append,
+            flags.truncate,
+            flags.sync
+        ),
+        (false, true, false, false, false, false)
+    );
+
+    let flags = OpenFlags::from(libc::O_RDWR);
+    assert_eq!(
+        (
+            flags.read,
+            flags.write,
+            flags.create,
+            flags.append,
+            flags.truncate,
+            flags.sync
+        ),
+        (true, true, false, false, false, false)
+    );
+
+    let flags = OpenFlags::from(libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND);
+    assert_eq!(
+        (
+            flags.read,
+            flags.write,
+            flags.create,
+            flags.append,
+            flags.truncate,
+            flags.sync
+        ),
+        (false, true, true, true, false, false)
+    );
+
+    let flags = OpenFlags::from(libc::O_RDWR | libc::O_TRUNC | libc::O_SYNC);
+    assert_eq!(
+        (
+            flags.read,
+            flags.write,
+            flags.create,
+            flags.append,
+            flags.truncate,
+            flags.sync
+        ),
+        (true, true, false, false, true, true)
+    );
 }
