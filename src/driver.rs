@@ -7,10 +7,10 @@ use std::{
 
 use fuser::FileAttr;
 
-use crate::database::ListDirEntry;
 use crate::errors::{Error, Result};
 use crate::types::FileType;
 use crate::{database::DatabaseOps, time::TimeSpec};
+use crate::{models::ListDirEntry, queries};
 
 const DURATION: Duration = Duration::from_secs(0);
 const POSIX_BLOCK_SIZE: u32 = 512;
@@ -21,42 +21,45 @@ pub struct FuseDriver {
 
 impl FuseDriver {
     fn ensure_root_exists(&mut self) -> Result<()> {
-        match self.db.lookup_inode(1) {
-            // If ino is 1, this is the root directory.
-            Err(Error::NotFound) => {
-                log::debug!("ino=1 requested, but does not exist yet, will create.");
-                let now = SystemTime::now();
+        self.db.with_write_tx(|tx| {
+            match queries::inode::lookup(tx, 1) {
+                // If ino is 1, this is the root directory.
+                Err(Error::NotFound) => {
+                    log::debug!("ino=1 requested, but does not exist yet, will create.");
+                    let now = SystemTime::now();
 
-                let mut attr = FileAttr {
-                    ino: 0,
-                    size: 0,
-                    blocks: 0,
-                    atime: now,
-                    mtime: now,
-                    ctime: now,
-                    crtime: now,
-                    kind: fuser::FileType::Directory,
-                    perm: 0o755u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-                    nlink: 2,
-                    uid: 1000, // TODO get real user
-                    gid: 1000, // TODO get real group
-                    rdev: 0,
-                    blksize: 0,
-                    flags: 0,
-                };
-                self.db.create_inode(&mut attr)?;
-                Ok(())
+                    let mut attr = FileAttr {
+                        ino: 0,
+                        size: 0,
+                        blocks: 0,
+                        atime: now,
+                        mtime: now,
+                        ctime: now,
+                        crtime: now,
+                        kind: fuser::FileType::Directory,
+                        perm: 0o755u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
+                        nlink: 2,
+                        uid: 1000, // TODO get real user
+                        gid: 1000, // TODO get real group
+                        rdev: 0,
+                        blksize: 0,
+                        flags: 0,
+                    };
+                    queries::inode::create(tx, &mut attr)?;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+                Ok(_) => Ok(()),
             }
-            Err(e) => Err(e),
-            Ok(_) => Ok(()),
-        }?;
-        Ok(())
+        })
     }
 
     fn lookup_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr) -> Result<FileAttr> {
-        let ino = self.db.lookup_dir_entry(parent, name)?;
-        let attr = self.db.lookup_inode(ino)?;
-        Ok(attr)
+        self.db.with_read_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, parent, name)?;
+            let attr = queries::inode::lookup(tx, ino)?;
+            Ok(attr)
+        })
     }
 
     fn setattr_impl(
@@ -76,40 +79,41 @@ impl FuseDriver {
         _bkuptime: Option<TimeSpec>,
         flags: Option<u32>,
     ) -> Result<FileAttr> {
-        // TODO optimize
-        if let Some(mode) = mode {
-            self.db.set_attr(ino, "mode", mode)?;
-        }
-        if let Some(uid) = uid {
-            self.db.set_attr(ino, "uid", uid)?;
-        }
-        if let Some(gid) = gid {
-            self.db.set_attr(ino, "gid", gid)?;
-        }
-        if let Some(size) = size {
-            self.db.set_attr(ino, "size", size)?;
-        }
-        if let Some(atime) = atime {
-            self.db.set_attr(ino, "atime_secs", atime.secs)?;
-            self.db.set_attr(ino, "atime_nanos", atime.nanos)?;
-        }
-        if let Some(mtime) = mtime {
-            self.db.set_attr(ino, "mtime_secs", mtime.secs)?;
-            self.db.set_attr(ino, "mtime_nanos", mtime.nanos)?;
-        }
-        if let Some(ctime) = ctime {
-            self.db.set_attr(ino, "ctime_secs", ctime.secs)?;
-            self.db.set_attr(ino, "ctime_nanos", ctime.nanos)?;
-        }
-        if let Some(crtime) = crtime {
-            self.db.set_attr(ino, "crtime_secs", crtime.secs)?;
-            self.db.set_attr(ino, "crtime_nanos", crtime.nanos)?;
-        }
-        if let Some(flags) = flags {
-            self.db.set_attr(ino, "flags", flags)?;
-        }
+        self.db.with_write_tx(|tx| {
+            if let Some(mode) = mode {
+                queries::inode::set_attr(tx, ino, "perm", mode)?;
+            }
+            if let Some(uid) = uid {
+                queries::inode::set_attr(tx, ino, "uid", uid)?;
+            }
+            if let Some(gid) = gid {
+                queries::inode::set_attr(tx, ino, "gid", gid)?;
+            }
+            if let Some(size) = size {
+                queries::inode::set_attr(tx, ino, "size", size)?;
+            }
+            if let Some(atime) = atime {
+                queries::inode::set_attr(tx, ino, "atime_secs", atime.secs)?;
+                queries::inode::set_attr(tx, ino, "atime_nanos", atime.nanos)?;
+            }
+            if let Some(mtime) = mtime {
+                queries::inode::set_attr(tx, ino, "mtime_secs", mtime.secs)?;
+                queries::inode::set_attr(tx, ino, "mtime_nanos", mtime.nanos)?;
+            }
+            if let Some(ctime) = ctime {
+                queries::inode::set_attr(tx, ino, "ctime_secs", ctime.secs)?;
+                queries::inode::set_attr(tx, ino, "ctime_nanos", ctime.nanos)?;
+            }
+            if let Some(crtime) = crtime {
+                queries::inode::set_attr(tx, ino, "crtime_secs", crtime.secs)?;
+                queries::inode::set_attr(tx, ino, "crtime_nanos", crtime.nanos)?;
+            }
+            if let Some(flags) = flags {
+                queries::inode::set_attr(tx, ino, "flags", flags)?;
+            }
 
-        self.db.lookup_inode(ino)
+            queries::inode::lookup(tx, ino)
+        })
     }
 
     fn mknod_impl(
@@ -121,7 +125,6 @@ impl FuseDriver {
         umask: u32,
         rdev: u32,
     ) -> Result<FileAttr> {
-        log::info!("mknod mode is o={:#o} umask={:#o}", mode, umask);
         let kind = FileType::from_mode(mode).ok_or(Error::InvalidArgument)?;
         let now = SystemTime::now();
 
@@ -142,32 +145,38 @@ impl FuseDriver {
             blksize: POSIX_BLOCK_SIZE,
             flags: 0,
         };
-        // TODO transaction
-        self.db.create_inode(&mut attr)?;
-        self.db.create_dir_entry(parent, name, attr.ino)?;
-        Ok(attr)
+
+        self.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut attr)?;
+            queries::dir_entry::create(tx, parent, name, attr.ino)?;
+            Ok(attr)
+        })
     }
 
     fn link_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr) -> Result<FileAttr> {
-        let mut attr = self.db.lookup_inode(ino)?;
-        attr.nlink += 1;
-        self.db.create_dir_entry(newparent, newname, ino)?;
-        self.db.set_attr(ino, "nlink", attr.nlink)?;
-        Ok(attr)
+        self.db.with_write_tx(|tx| {
+            let mut attr = queries::inode::lookup(tx, ino)?;
+            attr.nlink += 1;
+            queries::dir_entry::create(tx, newparent, newname, ino)?;
+            queries::inode::set_attr(tx, ino, "nlink", attr.nlink)?;
+            Ok(attr)
+        })
     }
 
     fn unlink_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
-        let ino = self.db.lookup_dir_entry(parent, name)?;
-        let mut attr = self.db.lookup_inode(ino)?;
-        attr.nlink -= 1;
-        if attr.nlink > 0 {
-            self.db.set_attr(ino, "nlink", attr.nlink)?;
-        } else {
-            self.db.remove_blocks(ino)?;
-            self.db.remove_inode(ino)?;
-        }
-        self.db.remove_dir_entry(parent, name)?;
-        Ok(())
+        self.db.with_write_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, parent, name)?;
+            let mut attr = queries::inode::lookup(tx, ino)?;
+            attr.nlink -= 1;
+            if attr.nlink > 0 {
+                queries::inode::set_attr(tx, ino, "nlink", attr.nlink)?;
+            } else {
+                queries::block::remove_blocks(tx, ino)?;
+                queries::inode::remove(tx, ino)?;
+            }
+            queries::dir_entry::remove(tx, parent, name)?;
+            Ok(())
+        })
     }
 
     fn mkdir_impl(
@@ -178,7 +187,6 @@ impl FuseDriver {
         mode: u32,
         umask: u32,
     ) -> Result<FileAttr> {
-        log::info!("mkdir mode is {:#o} umask is {:#}", mode, umask);
         let now = SystemTime::now();
         let mut attr = FileAttr {
             ino: 0,
@@ -197,28 +205,35 @@ impl FuseDriver {
             blksize: 0,
             flags: 0,
         };
-        self.db.create_inode(&mut attr)?;
-        self.db.create_dir_entry(parent, name, attr.ino)?;
-        Ok(attr)
+        self.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut attr)?;
+            queries::dir_entry::create(tx, parent, name, attr.ino)?;
+            Ok(attr)
+        })
     }
 
     fn rmdir_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
-        let ino = self.db.lookup_dir_entry(parent, name)?;
-        let empty = self.db.is_dir_empty(ino)?;
-        if !empty {
-            return Err(Error::NotEmpty);
-        }
-        self.db.remove_inode(ino)?;
-        self.db.remove_dir_entry(parent, name)?;
-        Ok(())
+        self.db.with_write_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, parent, name)?;
+            let empty = queries::dir_entry::is_dir_empty(tx, ino)?;
+            if !empty {
+                return Err(Error::NotEmpty);
+            }
+            queries::inode::remove(tx, ino)?;
+            queries::dir_entry::remove(tx, parent, name)?;
+
+            Ok(())
+        })
     }
 
     fn readdir_impl<F>(&mut self, _req: &fuser::Request<'_>, ino: u64, _fh: u64, offset: i64, iter: F) -> Result<()>
     where
         F: FnMut(ListDirEntry) -> bool,
     {
-        self.db.list_dir(ino, offset, iter)?;
-        Ok(())
+        self.db.with_read_tx(|tx| {
+            queries::dir_entry::list_dir(tx, ino, offset, iter)?;
+            Ok(())
+        })
     }
 
     fn read_impl(
@@ -231,18 +246,20 @@ impl FuseDriver {
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let attr = self.db.lookup_inode(ino)?;
-        let offset = offset as u64;
-        let remaining = attr.size - offset;
-        let cap = cmp::min(size as u64, remaining) as usize;
-        let mut buf = Vec::with_capacity(cap);
+        self.db.with_read_tx(|tx| {
+            let attr = queries::inode::lookup(tx, ino)?;
+            let offset = offset as u64;
+            let remaining = attr.size - offset;
+            let cap = cmp::min(size as u64, remaining) as usize;
+            let mut buf = Vec::with_capacity(cap);
 
-        self.db.iter_blocks_from(ino, offset, |block| {
-            block.copy_into(&mut buf);
-            buf.len() < buf.capacity()
-        })?;
+            queries::block::iter_blocks_from(tx, ino, offset, |block| {
+                block.copy_into(&mut buf);
+                buf.len() < buf.capacity()
+            })?;
 
-        Ok(buf)
+            Ok(buf)
+        })
     }
 
     fn write_impl(
@@ -259,37 +276,39 @@ impl FuseDriver {
         let size = data.len();
         let mut offset = offset as u64;
 
-        let mut attr = self.db.lookup_inode(ino)?;
+        self.db.with_write_tx(|tx| {
+            let mut attr = queries::inode::lookup(tx, ino)?;
 
-        // Overwrite existing blocks until we get a NotFound error indicating
-        // that there's no more blocks to overwrite. This usually happens when
-        // seek is used or the block is incomplete.
-        while !data.is_empty() {
-            match self.db.update_block(ino, offset, data) {
-                Ok((written, bytes_diff)) => {
-                    data = &data[written as usize..];
-                    offset += written;
-                    attr.size = (attr.size as i64 + bytes_diff) as u64;
+            // Overwrite existing blocks until we get a NotFound error indicating
+            // that there's no more blocks to overwrite. This usually happens when
+            // seek is used or the block is incomplete.
+            while !data.is_empty() {
+                match queries::block::update(tx, ino, offset, data) {
+                    Ok((written, bytes_diff)) => {
+                        data = &data[written as usize..];
+                        offset += written;
+                        attr.size = (attr.size as i64 + bytes_diff) as u64;
+                    }
+                    Err(Error::NotFound) => break,
+                    Err(e) => return Err(e),
                 }
-                Err(Error::NotFound) => break,
-                Err(e) => return Err(e),
             }
-        }
 
-        // Write the rest of the data in a new block.
-        while !data.is_empty() {
-            let written = self.db.create_block(ino, offset, data)?;
-            data = &data[written as usize..];
-            offset += written;
-            attr.size += written;
-        }
+            // Write the rest of the data in a new block.
+            while !data.is_empty() {
+                let written = queries::block::create(tx, ino, offset, data)?;
+                data = &data[written as usize..];
+                offset += written;
+                attr.size += written;
+            }
 
-        attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
+            attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
 
-        self.db.set_attr(ino, "size", attr.size)?;
-        self.db.set_attr(ino, "blocks", attr.blocks)?;
+            queries::inode::set_attr(tx, ino, "size", attr.size)?;
+            queries::inode::set_attr(tx, ino, "blocks", attr.blocks)?;
 
-        Ok(size as u32)
+            Ok(size as u32)
+        })
     }
 
     fn rename_impl(
@@ -301,7 +320,8 @@ impl FuseDriver {
         newname: &OsStr,
         _flags: u32,
     ) -> Result<()> {
-        self.db.rename_entry(parent, name, newparent, newname)
+        self.db
+            .with_write_tx(|tx| queries::dir_entry::rename(tx, parent, name, newparent, newname))
     }
 }
 
@@ -311,7 +331,7 @@ impl fuser::Filesystem for FuseDriver {
         _req: &fuser::Request<'_>,
         config: &mut fuser::KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
-        config.set_max_write(crate::database::BLOCK_SIZE).unwrap();
+        // config.set_max_write(crate::database::BLOCK_SIZE).unwrap();
         match self.ensure_root_exists() {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -334,7 +354,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         log::trace!("getattr(ino={})", ino);
-        let res = self.db.lookup_inode(ino);
+        let res = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino));
         log::trace!("getattr: {:?}", res);
 
         match res {

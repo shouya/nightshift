@@ -1,3 +1,5 @@
+use rusqlite::types::FromSqlError;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +27,12 @@ impl From<rusqlite::Error> for Error {
             rusqlite::Error::QueryReturnedNoRows => Error::NotFound,
             _ => Error::Other(err.to_string()),
         }
+    }
+}
+
+impl From<FromSqlError> for Error {
+    fn from(err: FromSqlError) -> Self {
+        Error::Other(err.to_string())
     }
 }
 

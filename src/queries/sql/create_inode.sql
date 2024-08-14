@@ -36,4 +36,4 @@ INSERT INTO inode (
     ?,
     ?,
     ?
-)
+);

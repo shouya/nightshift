@@ -1,0 +1,21 @@
+SELECT
+    ino,
+    size,
+    blocks,
+    atime_secs,
+    atime_nanos,
+    mtime_secs,
+    mtime_nanos,
+    ctime_secs,
+    ctime_nanos,
+    crtime_secs,
+    crtime_nanos,
+    kind,
+    perm,
+    nlink,
+    uid,
+    gid,
+    rdev,
+    blksize,
+    flags
+FROM inode WHERE ino = ?;

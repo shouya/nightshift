@@ -3,6 +3,8 @@
 mod database;
 mod driver;
 mod errors;
+mod models;
+mod queries;
 mod time;
 mod types;
 

@@ -23,6 +23,14 @@ impl FileType {
             _ => None,
         }
     }
+
+    pub fn import(kind: u8) -> fuser::FileType {
+        FileType::try_from(kind).expect("Invalid inode kind").into()
+    }
+
+    pub fn export(kind: fuser::FileType) -> u8 {
+        FileType::from(kind).into()
+    }
 }
 
 impl From<FileType> for u8 {
