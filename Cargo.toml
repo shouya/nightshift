@@ -15,6 +15,7 @@ rusqlite = { version = "0.32.1", features = [
 ] }
 signal-hook = "0.3.17"
 simple_logger = "5.0.0"
+slab = "0.4.9"
 
 [profile.release]
 # debug = true # For `cargo flamegraph`

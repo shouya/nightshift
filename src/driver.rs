@@ -6,6 +6,7 @@ use std::{
 };
 
 use fuser::FileAttr;
+use slab::Slab;
 
 use crate::errors::{Error, Result};
 use crate::types::FileType;
@@ -15,11 +16,23 @@ use crate::{models::ListDirEntry, queries};
 const DURATION: Duration = Duration::from_secs(0);
 const POSIX_BLOCK_SIZE: u32 = 512;
 
+struct FileHandle {
+    ino: u64,
+    offset: i64,
+}
+
 pub struct FuseDriver {
     pub db: DatabaseOps,
+    handles: Slab<FileHandle>,
 }
 
 impl FuseDriver {
+    pub fn new(db: DatabaseOps) -> Self {
+        Self {
+            db,
+            handles: Slab::new(),
+        }
+    }
     fn ensure_root_exists(&mut self) -> Result<()> {
         self.db.with_write_tx(|tx| {
             match queries::inode::lookup(tx, 1) {
@@ -234,6 +247,43 @@ impl FuseDriver {
             queries::dir_entry::list_dir(tx, ino, offset, iter)?;
             Ok(())
         })
+    }
+
+    fn lseek_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, whence: i32) -> Result<i64> {
+        let handle = self.handles.get_mut(fh as usize).ok_or(Error::NotFound)?;
+        match whence {
+            libc::SEEK_SET => {
+                handle.offset = offset;
+            }
+            libc::SEEK_CUR => {
+                handle.offset += offset;
+            }
+            libc::SEEK_END => {
+                self.db.with_read_tx(|tx| {
+                    let attr = queries::inode::lookup(tx, ino)?;
+                    handle.offset = attr.size as i64 + offset;
+                    Ok(())
+                })?;
+            }
+            _ => return Err(Error::InvalidArgument),
+        };
+
+        Ok(handle.offset)
+    }
+
+    fn release_impl(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        flush: bool,
+    ) -> Result<()> {
+        // TODO flush
+        let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
+        self.handles.try_remove(fh).ok_or(Error::NotFound)?;
+        Ok(())
     }
 
     fn read_impl(
@@ -529,8 +579,42 @@ impl fuser::Filesystem for FuseDriver {
         }
     }
 
-    fn open(&mut self, _req: &fuser::Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        reply.opened(1337, 0)
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        let fh = self.handles.insert(FileHandle { ino, offset: 0 });
+        reply.opened(fh as u64, 0);
+    }
+
+    fn lseek(
+        &mut self,
+        req: &fuser::Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        whence: i32,
+        reply: fuser::ReplyLseek,
+    ) {
+        let res = self.lseek_impl(req, ino, fh, offset, whence);
+        match res {
+            Ok(new_offset) => reply.offset(new_offset),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn release(
+        &mut self,
+        req: &fuser::Request<'_>,
+        ino: u64,
+        fh: u64,
+        flags: i32,
+        lock_owner: Option<u64>,
+        flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let res = self.release_impl(req, ino, fh, flags, lock_owner, flush);
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.errno()),
+        }
     }
 
     fn read(
