@@ -6,7 +6,6 @@ use std::{
 };
 
 use fuser::FileAttr;
-use log::debug;
 use slab::Slab;
 
 use crate::types::FileType;
@@ -85,14 +84,11 @@ impl FileHandle {
         if self.buf.is_empty() {
             return Ok(());
         }
-        log::debug!("flush, data is {}, offset = {}", self.buf.len(), self.write_offset);
 
         let mut attr = queries::inode::lookup(tx, self.ino)?;
         let mut new_offset = self.write_offset;
         let mut data = &self.buf[..];
         let mut modified_blocks = Vec::new();
-
-        dbg!(attr.size);
 
         // Update blocks if the start offset overrides blocks.
         queries::block::iter_blocks_from(tx, self.ino, new_offset, |mut block| {
@@ -100,11 +96,9 @@ impl FileHandle {
             data = &data[written as usize..];
             new_offset += written;
             attr.size = (attr.size as i64 + diff) as u64;
-            dbg!(attr.size, written, diff);
             if written > 0 {
                 modified_blocks.push(block);
             }
-            log::debug!("update block");
             Ok(!data.is_empty())
         })?;
 
@@ -114,7 +108,6 @@ impl FileHandle {
 
         // Write the rest of the data in a new block.
         while !data.is_empty() {
-            log::debug!("created new block");
             let written = queries::block::create(tx, self.ino, new_offset, data)?;
             data = &data[written as usize..];
             new_offset += written;
@@ -216,11 +209,11 @@ impl FuseDriver {
             }
             if let Some(size) = size {
                 let bno = Block::offset_to_bno(size);
-                queries::block::remove_blocks_from(tx, ino, bno + 1);
+                queries::block::remove_blocks_from(tx, ino, bno + 1)?;
                 match queries::block::get_block(tx, ino, bno) {
                     Ok(mut block) => {
                         block.truncate(size);
-                        queries::block::update(tx, &block);
+                        queries::block::update(tx, &block)?;
                     }
                     Err(Error::NotFound) => {}
                     Err(e) => return Err(e),
@@ -444,7 +437,11 @@ impl FuseDriver {
         // Detect if seek happened. If it did flush whatever is in the buffer
         // where it belongs and then update the offset where to write to.
         if handle.write_offset() != offset {
-            debug!("seek occured, flushing, new offset = {}", offset);
+            log::debug!(
+                "seek occured, flushing, old offset = {}, new offset = {}",
+                handle.write_offset(),
+                offset
+            );
             self.db.with_write_tx(|tx| handle.flush(tx))?;
             handle.write_offset = offset;
         }
@@ -454,7 +451,6 @@ impl FuseDriver {
                 self.db.with_write_tx(|tx| handle.flush(tx))?;
             }
             let consumed = handle.consume_input(data);
-            log::debug!("consumed {}", consumed);
             data = &data[consumed..];
         }
         Ok(start_size as u32)

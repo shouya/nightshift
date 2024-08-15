@@ -68,7 +68,6 @@ pub fn set_attr(
     name: &str,
     value: impl rusqlite::ToSql + std::fmt::Debug,
 ) -> Result<()> {
-    log::debug!("update attr {name} value = {:?}", value);
     let mut stmt = tx.prepare_cached(&format!("UPDATE inode SET `{name}` = ? WHERE ino = ?"))?;
     let affected = stmt.execute(params![value, ino])?;
     match affected {
