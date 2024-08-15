@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
         .init()
         .context("unable to install logging")?;
 
-    let db = DatabaseOps::open("foo.db", args.password.as_deref()).context("open db")?;
+    let db = DatabaseOps::open("foo.db", args.password).context("open db")?;
     let driver = FuseDriver::new(db);
 
     let mount = fuser::spawn_mount2(driver, "mnt-target", &[]).context("unable to create mount")?;
