@@ -18,6 +18,6 @@ simple_logger = "5.0.0"
 slab = "0.4.9"
 
 [profile.release]
-# debug = true # For `cargo flamegraph`
-strip = true
-lto = "thin"
+debug = true # For `cargo flamegraph`
+#strip = true
+#lto = "thin"

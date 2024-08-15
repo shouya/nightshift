@@ -15,6 +15,7 @@ use crate::{models::ListDirEntry, queries};
 
 const DURATION: Duration = Duration::from_secs(0);
 const POSIX_BLOCK_SIZE: u32 = 512;
+const BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct OpenFlags {
@@ -49,9 +50,80 @@ impl From<i32> for OpenFlags {
 
 struct FileHandle {
     ino: u64,
-    offset: u64,
-    end_offset: u64,
+    size: u64,
     flags: OpenFlags,
+    /// Stores the write position where buf must be written.
+    write_offset: u64,
+    /// Write data buffer used to optimize writes.
+    buf: Vec<u8>,
+}
+
+impl FileHandle {
+    fn buffer_remaining(&self) -> usize {
+        self.buf.capacity() - self.buf.len()
+    }
+
+    pub fn buffer_full(&self) -> bool {
+        self.buffer_remaining() == 0
+    }
+
+    pub fn write_offset(&self) -> u64 {
+        self.write_offset + self.buf.len() as u64
+    }
+
+    pub fn consume_input(&mut self, buf: &[u8]) -> usize {
+        let write = cmp::min(buf.len(), self.buffer_remaining());
+        self.buf.extend_from_slice(&buf[..write]);
+        write
+    }
+
+    pub fn flush(&mut self, tx: &mut rusqlite::Transaction) -> Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+
+        let mut attr = queries::inode::lookup(tx, self.ino)?;
+        let mut new_offset = self.write_offset;
+        let mut data = &self.buf[..];
+        let mut modified_blocks = Vec::new();
+
+        // Update blocks if the start offset overrides blocks.
+        queries::block::iter_blocks_from(tx, self.ino, new_offset, |mut block| {
+            let (written, diff) = block.write_at(new_offset, data);
+            data = &data[written as usize..];
+            new_offset += written;
+            attr.size = (attr.size as i64 + diff) as u64;
+            if written > 0 {
+                modified_blocks.push(block);
+            }
+            log::debug!("update block");
+            Ok(!data.is_empty())
+        })?;
+
+        for block in modified_blocks {
+            queries::block::update(tx, &block)?;
+        }
+
+        // Write the rest of the data in a new block.
+        while !data.is_empty() {
+            log::debug!("created new block");
+            let written = queries::block::create(tx, self.ino, new_offset, data)?;
+            data = &data[written as usize..];
+            new_offset += written;
+            attr.size += written;
+        }
+
+        attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
+
+        queries::inode::set_attr(tx, self.ino, "size", attr.size)?;
+        queries::inode::set_attr(tx, self.ino, "blocks", attr.blocks)?;
+
+        self.buf.clear();
+        self.write_offset = new_offset;
+        self.size = attr.size;
+
+        Ok(())
+    }
 }
 
 pub struct FuseDriver {
@@ -286,9 +358,10 @@ impl FuseDriver {
         let attr = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino))?;
         let fh = self.handles.insert(FileHandle {
             ino,
-            offset: 0,
-            end_offset: attr.size,
+            write_offset: 0,
+            size: attr.size,
             flags,
+            buf: Vec::with_capacity(BUFFER_SIZE),
         });
         let fh = u64::try_from(fh).map_err(|_| Error::Overflow)?;
         Ok((fh, flags.bits as u32))
@@ -301,38 +374,12 @@ impl FuseDriver {
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
-        flush: bool,
+        _flush: bool,
     ) -> Result<()> {
-        // TODO flush
         let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
-        self.handles.try_remove(fh).ok_or(Error::NotFound)?;
+        let mut handle = self.handles.try_remove(fh).ok_or(Error::NotFound)?;
+        self.db.with_write_tx(|tx| handle.flush(tx))?;
         Ok(())
-    }
-
-    fn lseek_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, whence: i32) -> Result<i64> {
-        let handle = self.handles.get_mut(fh as usize).ok_or(Error::NotFound)?;
-        match whence {
-            libc::SEEK_SET => {
-                handle.offset = u64::try_from(offset).map_err(|_| Error::InvalidArgument)?;
-            }
-            libc::SEEK_CUR => {
-                let mut current_offset = i64::try_from(handle.offset).map_err(|_| Error::InvalidArgument)?;
-                current_offset += offset;
-                handle.offset = u64::try_from(current_offset).map_err(|_| Error::InvalidArgument)?;
-            }
-            libc::SEEK_END => {
-                self.db.with_read_tx(|tx| {
-                    let attr = queries::inode::lookup(tx, ino)?;
-                    let mut end_offset = i64::try_from(attr.size).map_err(|_| Error::InvalidArgument)?;
-                    end_offset += offset;
-                    handle.offset = u64::try_from(end_offset).map_err(|_| Error::InvalidArgument)?;
-                    Ok(())
-                })?;
-            }
-            _ => return Err(Error::InvalidArgument),
-        };
-
-        Ok(i64::try_from(handle.offset).map_err(|_| Error::Overflow)?)
     }
 
     fn read_impl(
@@ -364,68 +411,41 @@ impl FuseDriver {
     fn write_impl(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
-        _fh: u64,
+        _ino: u64,
+        fh: u64,
         offset: i64,
         mut data: &[u8],
         _write_flags: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<u32> {
-        let size = data.len();
-        let mut offset = offset as u64;
+        let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
+        let handle = self.handles.get_mut(fh).ok_or(Error::NotFound)?;
+        let start_size = data.len();
+        let offset = offset as u64;
 
-        self.db.with_write_tx(|tx| {
-            let mut attr = queries::inode::lookup(tx, ino)?;
-            let mut write_offset = offset;
+        // Detect if seek happened. If it did flush whatever is in the buffer
+        // where it belongs and then update the offset where to write to.
+        if handle.write_offset() != offset {
+            self.db.with_write_tx(|tx| handle.flush(tx))?;
+            handle.write_offset = offset;
+        }
 
-            let mut modified_blocks = Vec::new();
-
-            queries::block::iter_blocks_from(tx, ino, offset, |mut block| {
-                let (written, diff) = block.write_at(write_offset, data);
-                data = &data[written as usize..];
-                write_offset += written;
-                attr.size = (attr.size as i64 + diff) as u64;
-                if written > 0 {
-                    modified_blocks.push(block);
-                }
-                Ok(!data.is_empty())
-            })?;
-
-            for block in modified_blocks {
-                queries::block::update(tx, &block)?;
+        while !data.is_empty() {
+            if handle.buffer_full() {
+                self.db.with_write_tx(|tx| handle.flush(tx))?;
             }
+            let consumed = handle.consume_input(data);
+            log::debug!("consumed {}", consumed);
+            data = &data[consumed..];
+        }
+        Ok(start_size as u32)
+    }
 
-            // // Overwrite existing blocks until we get a NotFound error indicating
-            // // that there's no more blocks to overwrite. This usually happens when
-            // // seek is used or the block is incomplete.
-            // while !data.is_empty() {
-            //     match queries::block::update(tx, ino, offset, data) {
-            //         Ok((written, bytes_diff)) => {
-            //             data = &data[written as usize..];
-            //             offset += written;
-            //             attr.size = (attr.size as i64 + bytes_diff) as u64;
-            //         }
-            //         Err(Error::NotFound) => break,
-            //         Err(e) => return Err(e),
-            //     }
-            // }
-
-            // Write the rest of the data in a new block.
-            while !data.is_empty() {
-                let written = queries::block::create(tx, ino, offset, data)?;
-                data = &data[written as usize..];
-                offset += written;
-                attr.size += written;
-            }
-
-            attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
-
-            queries::inode::set_attr(tx, ino, "size", attr.size)?;
-            queries::inode::set_attr(tx, ino, "blocks", attr.blocks)?;
-
-            Ok(size as u32)
-        })
+    fn flush_impl(&mut self, _req: &fuser::Request<'_>, _ino: u64, fh: u64, _lock_owner: u64) -> Result<()> {
+        let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
+        let handle = self.handles.get_mut(fh).ok_or(Error::NotFound)?;
+        self.db.with_write_tx(|tx| handle.flush(tx))
     }
 
     fn rename_impl(
@@ -640,25 +660,6 @@ impl fuser::Filesystem for FuseDriver {
         }
     }
 
-    fn lseek(
-        &mut self,
-        req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        whence: i32,
-        reply: fuser::ReplyLseek,
-    ) {
-        log::trace!("lseek(ino={}, fh={}, offset={}, whence={}", ino, fh, offset, whence);
-        let res = self.lseek_impl(req, ino, fh, offset, whence);
-        log::trace!("lseek: {:?}", res);
-
-        match res {
-            Ok(new_offset) => reply.offset(new_offset),
-            Err(e) => reply.error(e.errno()),
-        }
-    }
-
     fn release(
         &mut self,
         req: &fuser::Request<'_>,
@@ -719,6 +720,17 @@ impl fuser::Filesystem for FuseDriver {
 
         match res {
             Ok(written) => reply.written(written),
+            Err(e) => reply.error(e.errno()),
+        }
+    }
+
+    fn flush(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: fuser::ReplyEmpty) {
+        log::trace!("flush(ino={}, fh={}", ino, fh);
+        let res = self.flush_impl(req, ino, fh, lock_owner);
+        log::trace!("flush: {:?}", res);
+
+        match res {
+            Ok(_) => reply.ok(),
             Err(e) => reply.error(e.errno()),
         }
     }
