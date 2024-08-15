@@ -34,10 +34,8 @@ CREATE INDEX IF NOT EXISTS entry_parent_ino_name_idx ON dir_entry (parent_ino, n
 
 CREATE TABLE IF NOT EXISTS block (
     ino INTEGER NOT NULL,
-    offset INTEGER NOT NULL,
-    end_offset INTEGER NOT NULL,
+    bno INTEGER NOT NULL,
     data BLOB NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS block_ino_offsets_idx ON block (ino, offset, end_offset);
-CREATE INDEX IF NOT EXISTS block_offset ON block (offset);
+CREATE INDEX IF NOT EXISTS block_ino_bno_idx ON block (ino, bno);

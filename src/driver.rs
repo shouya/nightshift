@@ -6,11 +6,15 @@ use std::{
 };
 
 use fuser::FileAttr;
+use log::debug;
 use slab::Slab;
 
-use crate::errors::{Error, Result};
 use crate::types::FileType;
 use crate::{database::DatabaseOps, time::TimeSpec};
+use crate::{
+    errors::{Error, Result},
+    models::Block,
+};
 use crate::{models::ListDirEntry, queries};
 
 const DURATION: Duration = Duration::from_secs(0);
@@ -81,11 +85,14 @@ impl FileHandle {
         if self.buf.is_empty() {
             return Ok(());
         }
+        log::debug!("flush, data is {}, offset = {}", self.buf.len(), self.write_offset);
 
         let mut attr = queries::inode::lookup(tx, self.ino)?;
         let mut new_offset = self.write_offset;
         let mut data = &self.buf[..];
         let mut modified_blocks = Vec::new();
+
+        dbg!(attr.size);
 
         // Update blocks if the start offset overrides blocks.
         queries::block::iter_blocks_from(tx, self.ino, new_offset, |mut block| {
@@ -93,6 +100,7 @@ impl FileHandle {
             data = &data[written as usize..];
             new_offset += written;
             attr.size = (attr.size as i64 + diff) as u64;
+            dbg!(attr.size, written, diff);
             if written > 0 {
                 modified_blocks.push(block);
             }
@@ -114,7 +122,6 @@ impl FileHandle {
         }
 
         attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
-
         queries::inode::set_attr(tx, self.ino, "size", attr.size)?;
         queries::inode::set_attr(tx, self.ino, "blocks", attr.blocks)?;
 
@@ -208,6 +215,16 @@ impl FuseDriver {
                 queries::inode::set_attr(tx, ino, "gid", gid)?;
             }
             if let Some(size) = size {
+                let bno = Block::offset_to_bno(size);
+                queries::block::remove_blocks_from(tx, ino, bno + 1);
+                match queries::block::get_block(tx, ino, bno) {
+                    Ok(mut block) => {
+                        block.truncate(size);
+                        queries::block::update(tx, &block);
+                    }
+                    Err(Error::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
                 queries::inode::set_attr(tx, ino, "size", size)?;
             }
             if let Some(atime) = atime {
@@ -289,7 +306,7 @@ impl FuseDriver {
             if attr.nlink > 0 {
                 queries::inode::set_attr(tx, ino, "nlink", attr.nlink)?;
             } else {
-                queries::block::remove_blocks(tx, ino)?;
+                queries::block::remove_blocks_from(tx, ino, 0)?;
                 queries::inode::remove(tx, ino)?;
             }
             queries::dir_entry::remove(tx, parent, name)?;
@@ -427,6 +444,7 @@ impl FuseDriver {
         // Detect if seek happened. If it did flush whatever is in the buffer
         // where it belongs and then update the offset where to write to.
         if handle.write_offset() != offset {
+            debug!("seek occured, flushing, new offset = {}", offset);
             self.db.with_write_tx(|tx| handle.flush(tx))?;
             handle.write_offset = offset;
         }
@@ -578,7 +596,7 @@ impl fuser::Filesystem for FuseDriver {
     }
 
     fn link(&mut self, req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr, reply: fuser::ReplyEntry) {
-        log::trace!("link(ino={}, newparent={}, newname={:?}", ino, newparent, newname);
+        log::trace!("link(ino={}, newparent={}, newname={:?})", ino, newparent, newname);
         let res = self.link_impl(req, ino, newparent, newname);
         log::trace!("link: {:?}", res);
 
@@ -589,7 +607,7 @@ impl fuser::Filesystem for FuseDriver {
     }
 
     fn unlink(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        log::trace!("unlink(parent={}, name={:?}", parent, name);
+        log::trace!("unlink(parent={}, name={:?})", parent, name);
         let res = self.unlink_impl(req, parent, name);
         log::trace!("unlink: {:?}", res);
 
@@ -625,7 +643,7 @@ impl fuser::Filesystem for FuseDriver {
     }
 
     fn rmdir(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        log::trace!("rmdir(parent={}, name={:?}", parent, name);
+        log::trace!("rmdir(parent={}, name={:?})", parent, name);
         let res = self.rmdir_impl(req, parent, name);
         log::trace!("rmdir: {:?}", res);
 
@@ -650,7 +668,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn open(&mut self, req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let flags = OpenFlags::from(flags);
-        log::trace!("open(ino={}, flags={:?}", ino, flags);
+        log::trace!("open(ino={}, flags={:?})", ino, flags);
         let res = self.open_impl(req, ino, flags);
         log::trace!("open: {:?}", res);
 
@@ -670,7 +688,7 @@ impl fuser::Filesystem for FuseDriver {
         flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        log::trace!("release(ino={}, fh={}, flush={}", ino, fh, flush);
+        log::trace!("release(ino={}, fh={}, flush={})", ino, fh, flush);
         let res = self.release_impl(req, ino, fh, flags, lock_owner, flush);
         log::trace!("release: {:?}", res);
 
@@ -691,7 +709,7 @@ impl fuser::Filesystem for FuseDriver {
         lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        log::trace!("read(ino={}, offset={}, size={}", ino, offset, size);
+        log::trace!("read(ino={}, offset={}, size={})", ino, offset, size);
         let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
         log::trace!("read: {:?}", res.as_ref().map(|d| d.len()));
 
@@ -714,7 +732,7 @@ impl fuser::Filesystem for FuseDriver {
         lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        log::trace!("write(ino={}, offset={}, data_len={}", ino, offset, data.len());
+        log::trace!("write(ino={}, offset={}, data_len={})", ino, offset, data.len());
         let res = self.write_impl(req, ino, fh, offset, data, write_flags, flags, lock_owner);
         log::trace!("write: {:?}", res);
 
@@ -725,7 +743,7 @@ impl fuser::Filesystem for FuseDriver {
     }
 
     fn flush(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: fuser::ReplyEmpty) {
-        log::trace!("flush(ino={}, fh={}", ino, fh);
+        log::trace!("flush(ino={}, fh={})", ino, fh);
         let res = self.flush_impl(req, ino, fh, lock_owner);
         log::trace!("flush: {:?}", res);
 

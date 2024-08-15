@@ -11,8 +11,8 @@ libc = "0.2.155"
 log = "0.4.22"
 lz4_flex = "0.11.3"
 rusqlite = { version = "0.32.1", features = [
-    # "bundled",
-    "bundled-sqlcipher-vendored-openssl",
+    "bundled",
+    # "bundled-sqlcipher-vendored-openssl",
 ] }
 signal-hook = "0.3.17"
 simple_logger = "5.0.0"
