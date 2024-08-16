@@ -1,10 +1,16 @@
 #![allow(clippy::too_many_arguments)]
+
+mod attr;
+mod flags;
+mod handle;
+
 use std::{
     cmp,
     ffi::OsStr,
     time::{Duration, SystemTime},
 };
 
+use attr::FileAttrBuilder;
 use fuser::FileAttr;
 use slab::Slab;
 
@@ -15,116 +21,10 @@ use crate::{
     models::Block,
 };
 use crate::{models::ListDirEntry, queries};
+pub use flags::OpenFlags;
+pub use handle::FileHandle;
 
 const DURATION: Duration = Duration::from_secs(0);
-const POSIX_BLOCK_SIZE: u32 = 512;
-const BUFFER_SIZE: usize = 2 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug)]
-struct OpenFlags {
-    bits: i32,
-    read: bool,
-    write: bool,
-    create: bool,
-    append: bool,
-    truncate: bool,
-    sync: bool,
-}
-
-impl From<i32> for OpenFlags {
-    fn from(flags: i32) -> Self {
-        let read = flags & libc::O_WRONLY == libc::O_RDONLY || flags & libc::O_RDWR == libc::O_RDWR;
-        let write = flags & libc::O_WRONLY != 0 || flags & libc::O_RDWR == libc::O_RDWR;
-        let create = flags & libc::O_CREAT == libc::O_CREAT;
-        let append = flags & libc::O_APPEND == libc::O_APPEND;
-        let truncate = flags & libc::O_TRUNC == libc::O_TRUNC;
-        let sync = flags & libc::O_SYNC == libc::O_SYNC;
-        OpenFlags {
-            bits: flags,
-            read,
-            write,
-            create,
-            append,
-            truncate,
-            sync,
-        }
-    }
-}
-
-struct FileHandle {
-    ino: u64,
-    size: u64,
-    flags: OpenFlags,
-    /// Stores the write position where buf must be written.
-    write_offset: u64,
-    /// Write data buffer used to optimize writes.
-    buf: Vec<u8>,
-}
-
-impl FileHandle {
-    fn buffer_remaining(&self) -> usize {
-        self.buf.capacity() - self.buf.len()
-    }
-
-    pub fn buffer_full(&self) -> bool {
-        self.buffer_remaining() == 0
-    }
-
-    pub fn write_offset(&self) -> u64 {
-        self.write_offset + self.buf.len() as u64
-    }
-
-    pub fn consume_input(&mut self, buf: &[u8]) -> usize {
-        let write = cmp::min(buf.len(), self.buffer_remaining());
-        self.buf.extend_from_slice(&buf[..write]);
-        write
-    }
-
-    pub fn flush(&mut self, tx: &mut rusqlite::Transaction) -> Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-
-        let mut attr = queries::inode::lookup(tx, self.ino)?;
-        let mut new_offset = self.write_offset;
-        let mut data = &self.buf[..];
-        let mut modified_blocks = Vec::new();
-
-        // Update blocks if the start offset overrides blocks.
-        queries::block::iter_blocks_from(tx, self.ino, new_offset, |mut block| {
-            let (written, diff) = block.write_at(new_offset, data);
-            data = &data[written as usize..];
-            new_offset += written;
-            attr.size = (attr.size as i64 + diff) as u64;
-            if written > 0 {
-                modified_blocks.push(block);
-            }
-            Ok(!data.is_empty())
-        })?;
-
-        for block in modified_blocks {
-            queries::block::update(tx, &block)?;
-        }
-
-        // Write the rest of the data in a new block.
-        while !data.is_empty() {
-            let written = queries::block::create(tx, self.ino, new_offset, data)?;
-            data = &data[written as usize..];
-            new_offset += written;
-            attr.size += written;
-        }
-
-        attr.blocks = attr.size.div_ceil(POSIX_BLOCK_SIZE as u64);
-        queries::inode::set_attr(tx, self.ino, "size", attr.size)?;
-        queries::inode::set_attr(tx, self.ino, "blocks", attr.blocks)?;
-
-        self.buf.clear();
-        self.write_offset = new_offset;
-        self.size = attr.size;
-
-        Ok(())
-    }
-}
 
 pub struct FuseDriver {
     pub db: DatabaseOps,
@@ -144,25 +44,7 @@ impl FuseDriver {
                 // If ino is 1, this is the root directory.
                 Err(Error::NotFound) => {
                     log::debug!("ino=1 requested, but does not exist yet, will create.");
-                    let now = SystemTime::now();
-
-                    let mut attr = FileAttr {
-                        ino: 0,
-                        size: 0,
-                        blocks: 0,
-                        atime: now,
-                        mtime: now,
-                        ctime: now,
-                        crtime: now,
-                        kind: fuser::FileType::Directory,
-                        perm: 0o755u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-                        nlink: 2,
-                        uid: 1000, // TODO get real user
-                        gid: 1000, // TODO get real group
-                        rdev: 0,
-                        blksize: 0,
-                        flags: 0,
-                    };
+                    let mut attr = FileAttrBuilder::new_directory().build();
                     queries::inode::create(tx, &mut attr)?;
                     Ok(())
                 }
@@ -254,25 +136,13 @@ impl FuseDriver {
         rdev: u32,
     ) -> Result<FileAttr> {
         let kind = FileType::from_mode(mode).ok_or(Error::InvalidArgument)?;
-        let now = SystemTime::now();
 
-        let mut attr = FileAttr {
-            ino: 0,
-            size: 0,
-            blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: kind.into(),
-            perm: (mode & !umask) as u16, // TODO probably bad http://web.deu.edu.tr/doc/oreily/networking/puis/ch05_03.htm
-            nlink: 1,
-            uid: req.uid(),
-            gid: req.gid(),
-            rdev,
-            blksize: POSIX_BLOCK_SIZE,
-            flags: 0,
-        };
+        let mut attr = FileAttrBuilder::new_node(kind)
+            .with_uid(req.uid())
+            .with_gid(req.gid())
+            .with_mode_umask(mode, umask)
+            .with_rdev(rdev)
+            .build();
 
         self.db.with_write_tx(|tx| {
             queries::inode::create(tx, &mut attr)?;
@@ -315,24 +185,12 @@ impl FuseDriver {
         mode: u32,
         umask: u32,
     ) -> Result<FileAttr> {
-        let now = SystemTime::now();
-        let mut attr = FileAttr {
-            ino: 0,
-            size: 0,
-            blocks: 0,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
-            kind: fuser::FileType::Directory,
-            perm: (mode & !umask) as u16, // TODO probably bad
-            nlink: 2,
-            uid: req.uid(),
-            gid: req.gid(),
-            rdev: 0, // Not given for directory?
-            blksize: 0,
-            flags: 0,
-        };
+        let mut attr = FileAttrBuilder::new_directory()
+            .with_mode_umask(mode, umask)
+            .with_uid(req.uid())
+            .with_gid(req.gid())
+            .build();
+
         self.db.with_write_tx(|tx| {
             queries::inode::create(tx, &mut attr)?;
             queries::dir_entry::create(tx, parent, name, attr.ino)?;
@@ -366,13 +224,7 @@ impl FuseDriver {
 
     fn open_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: OpenFlags) -> Result<(u64, u32)> {
         let attr = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino))?;
-        let fh = self.handles.insert(FileHandle {
-            ino,
-            write_offset: 0,
-            size: attr.size,
-            flags,
-            buf: Vec::with_capacity(BUFFER_SIZE),
-        });
+        let fh = self.handles.insert(FileHandle::new(ino, attr.size, flags));
         let fh = u64::try_from(fh).map_err(|_| Error::Overflow)?;
         Ok((fh, flags.bits as u32))
     }
@@ -443,7 +295,7 @@ impl FuseDriver {
                 offset
             );
             self.db.with_write_tx(|tx| handle.flush(tx))?;
-            handle.write_offset = offset;
+            handle.seek_to(offset);
         }
 
         while !data.is_empty() {
@@ -774,72 +626,4 @@ impl fuser::Filesystem for FuseDriver {
             Err(e) => reply.error(e.errno()),
         }
     }
-}
-
-#[test]
-fn test_open_flags() {
-    let flags = OpenFlags::from(libc::O_RDONLY);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, false, false, false, false, false)
-    );
-
-    let flags = OpenFlags::from(libc::O_WRONLY);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (false, true, false, false, false, false)
-    );
-
-    let flags = OpenFlags::from(libc::O_RDWR);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, true, false, false, false, false)
-    );
-
-    let flags = OpenFlags::from(libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (false, true, true, true, false, false)
-    );
-
-    let flags = OpenFlags::from(libc::O_RDWR | libc::O_TRUNC | libc::O_SYNC);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, true, false, false, true, true)
-    );
 }
