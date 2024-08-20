@@ -100,6 +100,7 @@ impl FileHandle {
 mod tests {
     use crate::driver::attr::FileAttrBuilder;
     use crate::driver::{FileHandle, OpenFlags};
+    use crate::models::BLOCK_SIZE;
     use crate::queries;
 
     #[test]
@@ -181,7 +182,7 @@ mod tests {
         //
         // Simple consecutive write...
         //
-        fh.consume_input(&[1u8; 20000]);
+        fh.consume_input(&[1u8; (BLOCK_SIZE + 100) as usize]);
         fh.flush(&mut tx)?;
 
         let mut total_size = 0;
@@ -193,14 +194,14 @@ mod tests {
             Ok(true)
         })?;
 
-        assert_eq!(total_size, 20000);
+        assert_eq!(total_size, (BLOCK_SIZE + 100) as usize);
         assert_eq!(block_num, 2);
 
         //
         // Seek and overwrite
         //
-        fh.seek_to(15000);
-        fh.consume_input(&[2u8; 20000]);
+        fh.seek_to(BLOCK_SIZE / 2);
+        fh.consume_input(&[2u8; (BLOCK_SIZE * 2) as usize]);
         fh.flush(&mut tx)?;
 
         let mut total_size = 0;
@@ -212,7 +213,7 @@ mod tests {
             Ok(true)
         })?;
 
-        assert_eq!(total_size, 35000);
+        assert_eq!(total_size, (BLOCK_SIZE * 2 + (BLOCK_SIZE / 2)) as usize);
         assert_eq!(block_num, 3);
 
         Ok(())

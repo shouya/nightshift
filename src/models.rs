@@ -146,6 +146,6 @@ fn test_block_copy_into() {
 
 #[test]
 fn test_block_offset_to_bno() {
-    assert_eq!(Block::offset_to_bno(10000), 0);
-    assert_eq!(Block::offset_to_bno(20000), 1);
+    assert_eq!(Block::offset_to_bno(0), 0);
+    assert_eq!(Block::offset_to_bno(BLOCK_SIZE), 1);
 }

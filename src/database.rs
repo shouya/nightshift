@@ -17,6 +17,14 @@ impl DatabaseOps {
         Ok(DatabaseOps { db })
     }
 
+    #[cfg(test)]
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        let db = rusqlite::Connection::open_in_memory().context("open")?;
+        db.execute_batch(include_str!("queries/sql/schema.sql"))
+            .context("schema")?;
+        Ok(DatabaseOps { db })
+    }
+
     pub fn with_read_tx<T, F>(&mut self, scope: F) -> Result<T>
     where
         F: FnOnce(&mut rusqlite::Transaction) -> Result<T>,

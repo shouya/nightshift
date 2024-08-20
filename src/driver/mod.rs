@@ -3,6 +3,7 @@
 mod attr;
 mod flags;
 mod handle;
+mod request_info;
 
 use std::{
     cmp,
@@ -23,6 +24,7 @@ use crate::{
 use crate::{models::ListDirEntry, queries};
 pub use flags::OpenFlags;
 pub use handle::FileHandle;
+pub use request_info::RequestInfo;
 
 const DURATION: Duration = Duration::from_secs(0);
 
@@ -38,6 +40,7 @@ impl FuseDriver {
             handles: Slab::new(),
         }
     }
+
     fn ensure_root_exists(&mut self) -> Result<()> {
         self.db.with_write_tx(|tx| {
             match queries::inode::lookup(tx, 1) {
@@ -54,7 +57,7 @@ impl FuseDriver {
         })
     }
 
-    fn lookup_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr) -> Result<FileAttr> {
+    fn lookup_impl(&mut self, _req: RequestInfo, parent: u64, name: &OsStr) -> Result<FileAttr> {
         self.db.with_read_tx(|tx| {
             let ino = queries::dir_entry::lookup(tx, parent, name)?;
             let attr = queries::inode::lookup(tx, ino)?;
@@ -64,7 +67,7 @@ impl FuseDriver {
 
     fn setattr_impl(
         &mut self,
-        _req: &fuser::Request<'_>,
+        _req: RequestInfo,
         ino: u64,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -128,7 +131,7 @@ impl FuseDriver {
 
     fn mknod_impl(
         &mut self,
-        req: &fuser::Request<'_>,
+        req: RequestInfo,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -138,8 +141,8 @@ impl FuseDriver {
         let kind = FileType::from_mode(mode).ok_or(Error::InvalidArgument)?;
 
         let mut attr = FileAttrBuilder::new_node(kind)
-            .with_uid(req.uid())
-            .with_gid(req.gid())
+            .with_uid(req.uid)
+            .with_gid(req.gid)
             .with_mode_umask(mode, umask)
             .with_rdev(rdev)
             .build();
@@ -151,7 +154,7 @@ impl FuseDriver {
         })
     }
 
-    fn link_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr) -> Result<FileAttr> {
+    fn link_impl(&mut self, _req: RequestInfo, ino: u64, newparent: u64, newname: &OsStr) -> Result<FileAttr> {
         self.db.with_write_tx(|tx| {
             let mut attr = queries::inode::lookup(tx, ino)?;
             attr.nlink += 1;
@@ -161,7 +164,7 @@ impl FuseDriver {
         })
     }
 
-    fn unlink_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
+    fn unlink_impl(&mut self, _req: RequestInfo, parent: u64, name: &OsStr) -> Result<()> {
         self.db.with_write_tx(|tx| {
             let ino = queries::dir_entry::lookup(tx, parent, name)?;
             let mut attr = queries::inode::lookup(tx, ino)?;
@@ -177,18 +180,11 @@ impl FuseDriver {
         })
     }
 
-    fn mkdir_impl(
-        &mut self,
-        req: &fuser::Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-    ) -> Result<FileAttr> {
+    fn mkdir_impl(&mut self, req: RequestInfo, parent: u64, name: &OsStr, mode: u32, umask: u32) -> Result<FileAttr> {
         let mut attr = FileAttrBuilder::new_directory()
             .with_mode_umask(mode, umask)
-            .with_uid(req.uid())
-            .with_gid(req.gid())
+            .with_uid(req.uid)
+            .with_gid(req.gid)
             .build();
 
         self.db.with_write_tx(|tx| {
@@ -198,7 +194,7 @@ impl FuseDriver {
         })
     }
 
-    fn rmdir_impl(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &OsStr) -> Result<()> {
+    fn rmdir_impl(&mut self, _req: RequestInfo, parent: u64, name: &OsStr) -> Result<()> {
         self.db.with_write_tx(|tx| {
             let ino = queries::dir_entry::lookup(tx, parent, name)?;
             let empty = queries::dir_entry::is_dir_empty(tx, ino)?;
@@ -212,7 +208,7 @@ impl FuseDriver {
         })
     }
 
-    fn readdir_impl<F>(&mut self, _req: &fuser::Request<'_>, ino: u64, _fh: u64, offset: i64, iter: F) -> Result<()>
+    fn readdir_impl<F>(&mut self, _req: RequestInfo, ino: u64, _fh: u64, offset: i64, iter: F) -> Result<()>
     where
         F: FnMut(ListDirEntry) -> bool,
     {
@@ -222,7 +218,7 @@ impl FuseDriver {
         })
     }
 
-    fn open_impl(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: OpenFlags) -> Result<(u64, u32)> {
+    fn open_impl(&mut self, _req: RequestInfo, ino: u64, flags: OpenFlags) -> Result<(u64, u32)> {
         let attr = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino))?;
         let fh = self.handles.insert(FileHandle::new(ino, attr.size, flags));
         let fh = u64::try_from(fh).map_err(|_| Error::Overflow)?;
@@ -231,7 +227,7 @@ impl FuseDriver {
 
     fn release_impl(
         &mut self,
-        _req: &fuser::Request<'_>,
+        _req: RequestInfo,
         _ino: u64,
         fh: u64,
         _flags: i32,
@@ -246,7 +242,7 @@ impl FuseDriver {
 
     fn read_impl(
         &mut self,
-        _req: &fuser::Request<'_>,
+        _req: RequestInfo,
         ino: u64,
         _fh: u64,
         offset: i64,
@@ -272,7 +268,7 @@ impl FuseDriver {
 
     fn write_impl(
         &mut self,
-        _req: &fuser::Request<'_>,
+        _req: RequestInfo,
         _ino: u64,
         fh: u64,
         offset: i64,
@@ -308,7 +304,7 @@ impl FuseDriver {
         Ok(start_size as u32)
     }
 
-    fn flush_impl(&mut self, _req: &fuser::Request<'_>, _ino: u64, fh: u64, _lock_owner: u64) -> Result<()> {
+    fn flush_impl(&mut self, _req: RequestInfo, _ino: u64, fh: u64, _lock_owner: u64) -> Result<()> {
         let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
         let handle = self.handles.get_mut(fh).ok_or(Error::NotFound)?;
         self.db.with_write_tx(|tx| handle.flush(tx))
@@ -316,7 +312,7 @@ impl FuseDriver {
 
     fn rename_impl(
         &mut self,
-        _req: &fuser::Request<'_>,
+        _req: RequestInfo,
         parent: u64,
         name: &OsStr,
         newparent: u64,
@@ -346,7 +342,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn lookup(&mut self, req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
         log::trace!("lookup(parent={}, name={:?})", parent, name.to_string_lossy());
-        let res = self.lookup_impl(req, parent, name);
+        let res = self.lookup_impl(req.into(), parent, name);
         log::trace!("lookup: {:?}", res);
 
         match res {
@@ -393,7 +389,7 @@ impl fuser::Filesystem for FuseDriver {
             size,
         );
         let res = self.setattr_impl(
-            req,
+            req.into(),
             ino,
             mode,
             uid,
@@ -434,7 +430,7 @@ impl fuser::Filesystem for FuseDriver {
             umask,
             rdev
         );
-        let res = self.mknod_impl(req, parent, name, mode, umask, rdev);
+        let res = self.mknod_impl(req.into(), parent, name, mode, umask, rdev);
         log::trace!("mknod: {:?}", res);
 
         match res {
@@ -445,7 +441,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn link(&mut self, req: &fuser::Request<'_>, ino: u64, newparent: u64, newname: &OsStr, reply: fuser::ReplyEntry) {
         log::trace!("link(ino={}, newparent={}, newname={:?})", ino, newparent, newname);
-        let res = self.link_impl(req, ino, newparent, newname);
+        let res = self.link_impl(req.into(), ino, newparent, newname);
         log::trace!("link: {:?}", res);
 
         match res {
@@ -456,7 +452,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn unlink(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
         log::trace!("unlink(parent={}, name={:?})", parent, name);
-        let res = self.unlink_impl(req, parent, name);
+        let res = self.unlink_impl(req.into(), parent, name);
         log::trace!("unlink: {:?}", res);
 
         match res {
@@ -481,7 +477,7 @@ impl fuser::Filesystem for FuseDriver {
             mode,
             umask,
         );
-        let res = self.mkdir_impl(req, parent, name, mode, umask);
+        let res = self.mkdir_impl(req.into(), parent, name, mode, umask);
         log::trace!("mkdir: {:?}", res);
 
         match res {
@@ -492,7 +488,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn rmdir(&mut self, req: &fuser::Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
         log::trace!("rmdir(parent={}, name={:?})", parent, name);
-        let res = self.rmdir_impl(req, parent, name);
+        let res = self.rmdir_impl(req.into(), parent, name);
         log::trace!("rmdir: {:?}", res);
 
         match res {
@@ -503,7 +499,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn readdir(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, offset: i64, mut reply: fuser::ReplyDirectory) {
         log::trace!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
-        let res = self.readdir_impl(req, ino, fh, offset, |entry| {
+        let res = self.readdir_impl(req.into(), ino, fh, offset, |entry| {
             reply.add(entry.ino, entry.offset, entry.kind, entry.name)
         });
         log::trace!("readdir: {:?}", res);
@@ -517,7 +513,7 @@ impl fuser::Filesystem for FuseDriver {
     fn open(&mut self, req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let flags = OpenFlags::from(flags);
         log::trace!("open(ino={}, flags={:?})", ino, flags);
-        let res = self.open_impl(req, ino, flags);
+        let res = self.open_impl(req.into(), ino, flags);
         log::trace!("open: {:?}", res);
 
         match res {
@@ -537,7 +533,7 @@ impl fuser::Filesystem for FuseDriver {
         reply: fuser::ReplyEmpty,
     ) {
         log::trace!("release(ino={}, fh={}, flush={})", ino, fh, flush);
-        let res = self.release_impl(req, ino, fh, flags, lock_owner, flush);
+        let res = self.release_impl(req.into(), ino, fh, flags, lock_owner, flush);
         log::trace!("release: {:?}", res);
 
         match res {
@@ -558,7 +554,7 @@ impl fuser::Filesystem for FuseDriver {
         reply: fuser::ReplyData,
     ) {
         log::trace!("read(ino={}, offset={}, size={})", ino, offset, size);
-        let res = self.read_impl(req, ino, fh, offset, size, flags, lock_owner);
+        let res = self.read_impl(req.into(), ino, fh, offset, size, flags, lock_owner);
         log::trace!("read: {:?}", res.as_ref().map(|d| d.len()));
 
         match res {
@@ -581,7 +577,7 @@ impl fuser::Filesystem for FuseDriver {
         reply: fuser::ReplyWrite,
     ) {
         log::trace!("write(ino={}, offset={}, data_len={})", ino, offset, data.len());
-        let res = self.write_impl(req, ino, fh, offset, data, write_flags, flags, lock_owner);
+        let res = self.write_impl(req.into(), ino, fh, offset, data, write_flags, flags, lock_owner);
         log::trace!("write: {:?}", res);
 
         match res {
@@ -592,7 +588,7 @@ impl fuser::Filesystem for FuseDriver {
 
     fn flush(&mut self, req: &fuser::Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: fuser::ReplyEmpty) {
         log::trace!("flush(ino={}, fh={})", ino, fh);
-        let res = self.flush_impl(req, ino, fh, lock_owner);
+        let res = self.flush_impl(req.into(), ino, fh, lock_owner);
         log::trace!("flush: {:?}", res);
 
         match res {
@@ -618,12 +614,49 @@ impl fuser::Filesystem for FuseDriver {
             newparent,
             newname
         );
-        let res = self.rename_impl(req, parent, name, newparent, newname, flags);
+        let res = self.rename_impl(req.into(), parent, name, newparent, newname, flags);
         log::trace!("rename: {:?}", res);
 
         match res {
             Ok(_) => reply.ok(),
             Err(e) => reply.error(e.errno()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::{attr::FileAttrBuilder, FuseDriver, RequestInfo};
+    use crate::{database::DatabaseOps, errors::Error, queries, types::FileType};
+
+    #[test]
+    fn test_lookup() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+        let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
+            .with_uid(1337)
+            .with_gid(1338)
+            .build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            queries::inode::create(tx, &mut node)?;
+            queries::dir_entry::create(tx, root_dir.ino, OsStr::new("foo.txt"), node.ino)?;
+            Ok(())
+        })?;
+
+        let attr = driver.lookup_impl(RequestInfo::default(), root_dir.ino, OsStr::new("foo.txt"))?;
+        assert_eq!(attr.uid, 1337);
+        assert_eq!(attr.gid, 1338);
+
+        // Not found test
+        let res = driver.lookup_impl(RequestInfo::default(), root_dir.ino, OsStr::new("not_found.jpg"));
+        assert_eq!(res, Err(Error::NotFound));
+
+        Ok(())
     }
 }
