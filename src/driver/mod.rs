@@ -332,9 +332,9 @@ impl fuser::Filesystem for FuseDriver {
     fn init(
         &mut self,
         _req: &fuser::Request<'_>,
-        _config: &mut fuser::KernelConfig,
+        config: &mut fuser::KernelConfig,
     ) -> std::result::Result<(), libc::c_int> {
-        // config.set_max_write(crate::database::BLOCK_SIZE).unwrap();
+        config.set_max_write(128 * 1024).expect("unable to set max_write");
         match self.ensure_root_exists() {
             Ok(()) => Ok(()),
             Err(e) => {

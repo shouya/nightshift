@@ -51,6 +51,7 @@ fn main() -> anyhow::Result<()> {
     while !term.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
     }
-    drop(mount);
+    // Umount & cleanup
+    mount.join();
     Ok(())
 }

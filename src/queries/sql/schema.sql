@@ -1,4 +1,6 @@
 -- https://phiresky.github.io/blog/2020/sqlite-performance-tuning/
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 1073741824; -- 1 GiB
 
