@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Clone, Copy, Debug)]
 pub struct OpenFlags {
     pub bits: i32,
@@ -29,70 +31,75 @@ impl From<i32> for OpenFlags {
     }
 }
 
-#[test]
-fn test_open_flags() {
-    let flags = OpenFlags::from(libc::O_RDONLY);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, false, false, false, false, false)
-    );
+#[cfg(test)]
+mod tests {
+    use crate::driver::OpenFlags;
 
-    let flags = OpenFlags::from(libc::O_WRONLY);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (false, true, false, false, false, false)
-    );
+    #[test]
+    fn test_open_flags() {
+        let flags = OpenFlags::from(libc::O_RDONLY);
+        assert_eq!(
+            (
+                flags.read,
+                flags.write,
+                flags.create,
+                flags.append,
+                flags.truncate,
+                flags.sync
+            ),
+            (true, false, false, false, false, false)
+        );
 
-    let flags = OpenFlags::from(libc::O_RDWR);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, true, false, false, false, false)
-    );
+        let flags = OpenFlags::from(libc::O_WRONLY);
+        assert_eq!(
+            (
+                flags.read,
+                flags.write,
+                flags.create,
+                flags.append,
+                flags.truncate,
+                flags.sync
+            ),
+            (false, true, false, false, false, false)
+        );
 
-    let flags = OpenFlags::from(libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (false, true, true, true, false, false)
-    );
+        let flags = OpenFlags::from(libc::O_RDWR);
+        assert_eq!(
+            (
+                flags.read,
+                flags.write,
+                flags.create,
+                flags.append,
+                flags.truncate,
+                flags.sync
+            ),
+            (true, true, false, false, false, false)
+        );
 
-    let flags = OpenFlags::from(libc::O_RDWR | libc::O_TRUNC | libc::O_SYNC);
-    assert_eq!(
-        (
-            flags.read,
-            flags.write,
-            flags.create,
-            flags.append,
-            flags.truncate,
-            flags.sync
-        ),
-        (true, true, false, false, true, true)
-    );
+        let flags = OpenFlags::from(libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND);
+        assert_eq!(
+            (
+                flags.read,
+                flags.write,
+                flags.create,
+                flags.append,
+                flags.truncate,
+                flags.sync
+            ),
+            (false, true, true, true, false, false)
+        );
+
+        let flags = OpenFlags::from(libc::O_RDWR | libc::O_TRUNC | libc::O_SYNC);
+        assert_eq!(
+            (
+                flags.read,
+                flags.write,
+                flags.create,
+                flags.append,
+                flags.truncate,
+                flags.sync
+            ),
+            (true, true, false, false, true, true)
+        );
+    }
 }

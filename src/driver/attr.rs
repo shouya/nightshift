@@ -66,11 +66,6 @@ impl FileAttrBuilder {
         self
     }
 
-    pub fn with_perm(mut self, perm: u16) -> FileAttrBuilder {
-        self.attr.perm = perm;
-        self
-    }
-
     pub fn with_mode_umask(mut self, mode: u32, umask: u32) -> FileAttrBuilder {
         self.attr.perm = (mode & !umask) as u16;
         self

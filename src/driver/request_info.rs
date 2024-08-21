@@ -2,6 +2,7 @@
 pub struct RequestInfo {
     pub uid: u32,
     pub gid: u32,
+    #[allow(dead_code)]
     pub pid: u32,
 }
 

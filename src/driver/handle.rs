@@ -6,9 +6,11 @@ use crate::queries;
 
 const BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
+#[derive(Debug)]
 pub struct FileHandle {
     pub ino: u64,
     pub size: u64,
+    #[allow(dead_code)]
     pub flags: OpenFlags,
     /// Stores the write position where buf must be written.
     write_offset: u64,
@@ -107,6 +109,7 @@ mod tests {
     use crate::driver::{FileHandle, OpenFlags};
     use crate::models::BLOCK_SIZE;
     use crate::queries;
+    use test_log::test;
 
     #[test]
     fn test_file_handle_buffer_remaining() {

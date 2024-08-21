@@ -106,49 +106,55 @@ impl std::fmt::Debug for Block {
     }
 }
 
-#[test]
-fn test_block() {
-    let b = Block::empty(37, 1);
-    assert_eq!(b.ino, 37);
-    assert_eq!(b.start_offset(), BLOCK_SIZE);
-    assert_eq!(b.end_offset(), BLOCK_SIZE + BLOCK_SIZE);
-    assert_eq!(b.available(), BLOCK_SIZE as u32);
-}
+#[cfg(test)]
+mod tests {
+    use crate::models::{Block, BLOCK_SIZE};
+    use test_log::test;
 
-#[test]
-fn test_block_consume() {
-    let mut b = Block::empty(37, 0);
-    assert_eq!(b.consume(&[0; 100]), 100);
-    assert_eq!(b.consume(&[1; BLOCK_SIZE as usize]), BLOCK_SIZE - 100);
-    assert!(b.data[..100].iter().all(|&b| b == 0));
-    assert!(b.data[100..].iter().all(|&b| b == 1));
-}
+    #[test]
+    fn test_block() {
+        let b = Block::empty(37, 1);
+        assert_eq!(b.ino, 37);
+        assert_eq!(b.start_offset(), BLOCK_SIZE);
+        assert_eq!(b.end_offset(), BLOCK_SIZE + BLOCK_SIZE);
+        assert_eq!(b.available(), BLOCK_SIZE as u32);
+    }
 
-#[test]
-fn test_block_write_at() {
-    let mut b = Block::empty(0, 1);
-    assert_eq!(b.write_at(BLOCK_SIZE, &[1; 5]), (5, 5));
-    assert_eq!(b.data, vec![1; 5]);
+    #[test]
+    fn test_block_consume() {
+        let mut b = Block::empty(37, 0);
+        assert_eq!(b.consume(&[0; 100]), 100);
+        assert_eq!(b.consume(&[1; BLOCK_SIZE as usize]), BLOCK_SIZE - 100);
+        assert!(b.data[..100].iter().all(|&b| b == 0));
+        assert!(b.data[100..].iter().all(|&b| b == 1));
+    }
 
-    let mut b = Block::empty(0, 1);
-    assert_eq!(b.write_at(BLOCK_SIZE + 5, &[1; 5]), (5, 10));
-    assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
-}
+    #[test]
+    fn test_block_write_at() {
+        let mut b = Block::empty(0, 1);
+        assert_eq!(b.write_at(BLOCK_SIZE, &[1; 5]), (5, 5));
+        assert_eq!(b.data, vec![1; 5]);
 
-#[test]
-fn test_block_copy_into() {
-    let mut b = Block::empty(0, 1);
-    b.data = vec![1; 10];
+        let mut b = Block::empty(0, 1);
+        assert_eq!(b.write_at(BLOCK_SIZE + 5, &[1; 5]), (5, 10));
+        assert_eq!(b.data, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+    }
 
-    let mut buf = Vec::with_capacity(5);
-    assert_eq!(b.copy_into(&mut buf), 5);
+    #[test]
+    fn test_block_copy_into() {
+        let mut b = Block::empty(0, 1);
+        b.data = vec![1; 10];
 
-    let mut buf = Vec::with_capacity(15);
-    assert_eq!(b.copy_into(&mut buf), 10);
-}
+        let mut buf = Vec::with_capacity(5);
+        assert_eq!(b.copy_into(&mut buf), 5);
 
-#[test]
-fn test_block_offset_to_bno() {
-    assert_eq!(Block::offset_to_bno(0), 0);
-    assert_eq!(Block::offset_to_bno(BLOCK_SIZE), 1);
+        let mut buf = Vec::with_capacity(15);
+        assert_eq!(b.copy_into(&mut buf), 10);
+    }
+
+    #[test]
+    fn test_block_offset_to_bno() {
+        assert_eq!(Block::offset_to_bno(0), 0);
+        assert_eq!(Block::offset_to_bno(BLOCK_SIZE), 1);
+    }
 }
