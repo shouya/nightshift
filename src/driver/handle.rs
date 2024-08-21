@@ -31,6 +31,10 @@ impl FileHandle {
         self.buf.capacity() - self.buf.len()
     }
 
+    pub fn buffer_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
     pub fn buffer_full(&self) -> bool {
         self.buffer_remaining() == 0
     }
@@ -54,6 +58,7 @@ impl FileHandle {
         if self.buf.is_empty() {
             return Ok(());
         }
+        log::debug!("flush called, {} {}", self.buf.len(), self.buf.capacity());
 
         let mut attr = queries::inode::lookup(tx, self.ino)?;
         let mut new_offset = self.write_offset;

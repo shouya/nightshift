@@ -34,6 +34,7 @@ impl Block {
             data: vec![0u8; BLOCK_SIZE as usize],
         };
         let n = lz4_flex::decompress_into(compressed_data, &mut b.data).expect("lz4 decompress output too small");
+        log::debug!("decompress {} result {}", compressed_data.len(), n);
         b.data.truncate(n);
         b
     }
@@ -46,6 +47,7 @@ impl Block {
         let max_size = lz4_flex::block::get_maximum_output_size(self.data.len());
         dest.resize(max_size, 0);
         let written = lz4_flex::compress_into(&self.data, dest).expect("lz4 compress output too small");
+        log::debug!("compress {} result {}", self.data.len(), written);
         &dest[..written]
     }
 
@@ -65,6 +67,7 @@ impl Block {
         let avail = self.available();
         let data_len = u32::try_from(data.len()).expect("data size overflow");
         let max_write = cmp::min(avail, data_len) as usize;
+        log::debug!("extend max write {}", max_write);
         self.data.extend_from_slice(&data[..max_write]);
         u64::try_from(max_write).expect("written overflow")
     }

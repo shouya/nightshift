@@ -244,12 +244,20 @@ impl FuseDriver {
         &mut self,
         _req: RequestInfo,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
     ) -> Result<Vec<u8>> {
+        let fh = usize::try_from(fh).map_err(|_| Error::Overflow)?;
+        let handle = self.handles.get_mut(fh).ok_or(Error::NotFound)?;
+
+        // If any data is left in the write buffer, flush it before reading.
+        if !handle.buffer_empty() {
+            self.db.with_write_tx(|tx| handle.flush(tx))?;
+        }
+
         self.db.with_read_tx(|tx| {
             let attr = queries::inode::lookup(tx, ino)?;
             let offset = offset as u64;
@@ -296,6 +304,7 @@ impl FuseDriver {
 
         while !data.is_empty() {
             if handle.buffer_full() {
+                log::debug!("handle buffer full, flushing");
                 self.db.with_write_tx(|tx| handle.flush(tx))?;
             }
             let consumed = handle.consume_input(data);
@@ -628,8 +637,9 @@ impl fuser::Filesystem for FuseDriver {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{attr::FileAttrBuilder, FuseDriver, RequestInfo};
+    use super::{attr::FileAttrBuilder, FuseDriver, OpenFlags, RequestInfo};
     use crate::{database::DatabaseOps, errors::Error, queries, types::FileType};
+    use test_log::test;
 
     #[test]
     fn test_lookup() -> anyhow::Result<()> {
@@ -657,6 +667,69 @@ mod tests {
         let res = driver.lookup_impl(RequestInfo::default(), root_dir.ino, OsStr::new("not_found.jpg"));
         assert_eq!(res, Err(Error::NotFound));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_mknod() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            Ok(())
+        })?;
+
+        let attr = driver.mknod_impl(
+            RequestInfo::default(),
+            root_dir.ino,
+            OsStr::new("foo.txt"),
+            0o644 | libc::S_IFREG,
+            0,
+            1337,
+        )?;
+
+        let db_attr = driver.db.with_read_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo.txt"))?;
+            queries::inode::lookup(tx, ino)
+        })?;
+
+        assert_eq!(attr.ino, db_attr.ino);
+        assert_eq!(attr.perm, db_attr.perm);
+        assert_eq!(attr.kind, db_attr.kind);
+        assert_eq!(db_attr.kind, fuser::FileType::RegularFile);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_write_cycle() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+        let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
+            .with_uid(1337)
+            .with_gid(1338)
+            .build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            queries::inode::create(tx, &mut node)?;
+            queries::dir_entry::create(tx, root_dir.ino, OsStr::new("foo.txt"), node.ino)?;
+            Ok(())
+        })?;
+
+        let (fh, _) = driver.open_impl(RequestInfo::default(), node.ino, OpenFlags::from(libc::O_RDWR))?;
+        driver.write_impl(RequestInfo::default(), node.ino, fh, 0, &[1u8; 200], 0, 0, None)?;
+        driver.write_impl(RequestInfo::default(), node.ino, fh, 200, &[2u8; 200], 0, 0, None)?;
+
+        let data = driver.read_impl(RequestInfo::default(), node.ino, fh, 0, 400, 0, None)?;
+        assert_eq!(data.len(), 400);
+        assert_eq!(&data[..200], &[1u8; 200]);
+        assert_eq!(&data[200..], &[2u8; 200]);
         Ok(())
     }
 }
