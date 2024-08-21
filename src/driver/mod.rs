@@ -700,6 +700,35 @@ mod tests {
         assert_eq!(attr.perm, db_attr.perm);
         assert_eq!(attr.kind, db_attr.kind);
         assert_eq!(db_attr.kind, fuser::FileType::RegularFile);
+        assert_eq!(db_attr.perm, 0o644);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mkdir() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            Ok(())
+        })?;
+
+        let attr = driver.mkdir_impl(RequestInfo::default(), root_dir.ino, OsStr::new("foo"), 0o755, 0)?;
+
+        let db_attr = driver.db.with_read_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo"))?;
+            queries::inode::lookup(tx, ino)
+        })?;
+
+        assert_eq!(attr.ino, db_attr.ino);
+        assert_eq!(attr.perm, db_attr.perm);
+        assert_eq!(attr.kind, db_attr.kind);
+        assert_eq!(db_attr.kind, fuser::FileType::Directory);
+        assert_eq!(db_attr.perm, 0o755);
 
         Ok(())
     }

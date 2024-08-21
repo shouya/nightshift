@@ -66,7 +66,8 @@ impl FileAttrBuilder {
         self
     }
 
-    pub fn with_mode_umask(mut self, mode: u32, umask: u32) -> FileAttrBuilder {
+    pub fn with_mode_umask(mut self, mut mode: u32, umask: u32) -> FileAttrBuilder {
+        mode &= !libc::S_IFMT; // remove file type from mode
         self.attr.perm = (mode & !umask) as u16;
         self
     }
