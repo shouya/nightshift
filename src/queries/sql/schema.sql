@@ -5,6 +5,12 @@ PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 1073741824; -- 1 GiB
 PRAGMA foreign_keys = ON;
 
+-- SQLCipher turns this ON by default but it makes DELETE performance horrible
+-- for large files. By turning this off, deleted pages are not zeroed but they
+-- are still encrypted. Using the nightshift optimize command will get rid of
+-- pages that contain deleted data.
+PRAGMA secure_delete = OFF;
+
 CREATE TABLE IF NOT EXISTS inode(
     ino INTEGER PRIMARY KEY,
     size INTEGER NOT NULL,
@@ -41,4 +47,5 @@ CREATE TABLE IF NOT EXISTS block (
     data BLOB NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS block_bno_idx ON block (bno);
 CREATE INDEX IF NOT EXISTS block_ino_bno_idx ON block (ino, bno);
