@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::errors::Result;
 use anyhow::Context;
 use rusqlite::params;
@@ -7,10 +9,9 @@ pub struct DatabaseOps {
 }
 
 impl DatabaseOps {
-    pub fn open(path: &str, mut password: Option<String>) -> anyhow::Result<Self> {
+    pub fn open(path: &Path, key: String) -> anyhow::Result<Self> {
         let db = rusqlite::Connection::open(path).context("open")?;
-        let password = password.take().unwrap_or("".into());
-        set_cipher_key(&db, password)?;
+        set_cipher_key(&db, key)?;
 
         db.execute_batch(include_str!("queries/sql/schema.sql"))
             .context("schema")?;
@@ -44,17 +45,21 @@ impl DatabaseOps {
         tx.commit()?;
         Ok(val)
     }
+    pub fn vacuum(&mut self) -> anyhow::Result<()> {
+        self.db.execute("VACUUM;", params![])?;
+        Ok(())
+    }
 }
 
-fn set_cipher_key(db: &rusqlite::Connection, password: String) -> anyhow::Result<()> {
-    db.pragma_update(None, "key", password).context("pragma")?;
+fn set_cipher_key(db: &rusqlite::Connection, key: String) -> anyhow::Result<()> {
+    db.pragma_update(None, "key", key).context("pragma")?;
     match db
         .prepare("SELECT count(*) FROM sqlite_master")
         .and_then(|mut stmt| stmt.query(params![]).map(|_| ()))
     {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ffi::ErrorCode::NotADatabase => {
-            anyhow::bail!("Invalid password");
+            anyhow::bail!("Invalid key");
         }
         Err(e) => anyhow::bail!("SQLite error: {e}"),
     }
