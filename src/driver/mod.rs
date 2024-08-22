@@ -15,13 +15,13 @@ use attr::FileAttrBuilder;
 use fuser::FileAttr;
 use slab::Slab;
 
+use crate::queries::{self, dir_entry::ListDirEntry};
 use crate::types::FileType;
 use crate::{database::DatabaseOps, time::TimeSpec};
 use crate::{
     errors::{Error, Result},
-    models::Block,
+    queries::block::Block,
 };
-use crate::{models::ListDirEntry, queries};
 pub use flags::OpenFlags;
 pub use handle::FileHandle;
 pub use request_info::RequestInfo;

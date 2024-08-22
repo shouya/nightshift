@@ -2,7 +2,6 @@ use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
 use crate::{
     errors::{Error, Result},
-    models::ListDirEntry,
     types::FileType,
 };
 use rusqlite::params;
@@ -68,4 +67,11 @@ pub fn list_dir(
         }
     }
     Ok(())
+}
+
+pub struct ListDirEntry<'n> {
+    pub offset: i64,
+    pub ino: u64,
+    pub name: &'n OsStr,
+    pub kind: fuser::FileType,
 }

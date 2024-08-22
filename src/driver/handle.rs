@@ -107,8 +107,8 @@ impl FileHandle {
 mod tests {
     use crate::driver::attr::FileAttrBuilder;
     use crate::driver::{FileHandle, OpenFlags};
-    use crate::models::BLOCK_SIZE;
     use crate::queries;
+    use crate::queries::block::BLOCK_SIZE;
     use test_log::test;
 
     #[test]
