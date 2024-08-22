@@ -171,11 +171,12 @@ impl FuseDriver {
             attr.nlink -= 1;
             if attr.nlink > 0 {
                 queries::inode::set_attr(tx, ino, "nlink", attr.nlink)?;
+                queries::dir_entry::remove(tx, parent, name)?;
             } else {
-                queries::block::remove_blocks_from(tx, ino, 0)?;
+                // If nlink == 0, the inode removal will remove the dir_entry through CASCADE.
+                // The blocks will also be removed through CASCADE.
                 queries::inode::remove(tx, ino)?;
             }
-            queries::dir_entry::remove(tx, parent, name)?;
             Ok(())
         })
     }
@@ -201,9 +202,7 @@ impl FuseDriver {
             if !empty {
                 return Err(Error::NotEmpty);
             }
-            queries::inode::remove(tx, ino)?;
-            queries::dir_entry::remove(tx, parent, name)?;
-
+            queries::inode::remove(tx, ino)?; // CASCADE will remove dir_entry
             Ok(())
         })
     }
@@ -641,6 +640,17 @@ mod tests {
     use crate::{database::DatabaseOps, errors::Error, queries, types::FileType};
     use test_log::test;
 
+    fn count_blocks(driver: &mut FuseDriver, ino: u64) -> anyhow::Result<usize> {
+        let mut block_count = 0;
+        driver.db.with_read_tx(|tx| {
+            queries::block::iter_blocks_from(tx, ino, 0, |_| {
+                block_count += 1;
+                Ok(true)
+            })
+        })?;
+        Ok(block_count)
+    }
+
     #[test]
     fn test_lookup() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
@@ -706,6 +716,63 @@ mod tests {
     }
 
     #[test]
+    fn test_link_unlink() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+        let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
+            .with_uid(1337)
+            .with_gid(1338)
+            .build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            queries::inode::create(tx, &mut node)?;
+            queries::dir_entry::create(tx, root_dir.ino, OsStr::new("foo.txt"), node.ino)?;
+            queries::block::create(tx, node.ino, 0, b"hello world!")?;
+            Ok(())
+        })?;
+
+        assert_eq!(count_blocks(&mut driver, node.ino)?, 1);
+
+        let linked_node = driver.link_impl(RequestInfo::default(), node.ino, root_dir.ino, OsStr::new("foo2.txt"))?;
+        let linked_ino = driver
+            .db
+            .with_read_tx(|tx| queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo2.txt")))?;
+        assert_eq!(linked_node.ino, linked_ino);
+        assert_eq!(linked_node.ino, node.ino);
+        assert_eq!(linked_node.nlink, 2);
+
+        // Unlink foo.txt
+        driver.unlink_impl(RequestInfo::default(), root_dir.ino, OsStr::new("foo.txt"))?;
+
+        // Make sure foo.txt is gone
+        let res = driver
+            .db
+            .with_read_tx(|tx| queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo.txt")));
+        assert_eq!(res, Err(Error::NotFound));
+
+        // Make sure the inode has updated nlink
+        let updated_node = driver.db.with_read_tx(|tx| queries::inode::lookup(tx, linked_ino))?;
+        assert_eq!(updated_node.nlink, 1);
+
+        println!("last");
+        // Unlink foo2.txt
+        driver.unlink_impl(RequestInfo::default(), root_dir.ino, OsStr::new("foo2.txt"))?;
+        println!("last 2");
+
+        // Make sure the inode is gone
+        let res = driver.db.with_read_tx(|tx| queries::inode::lookup(tx, linked_ino));
+        assert_eq!(res, Err(Error::NotFound));
+
+        // Make sure the blocks are gone
+        assert_eq!(count_blocks(&mut driver, node.ino)?, 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_mkdir() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
         let mut driver = FuseDriver::new(db);
@@ -729,6 +796,37 @@ mod tests {
         assert_eq!(attr.kind, db_attr.kind);
         assert_eq!(db_attr.kind, fuser::FileType::Directory);
         assert_eq!(db_attr.perm, 0o755);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmdir() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+        let mut dir1 = FileAttrBuilder::new_directory().build();
+        let mut file1 = FileAttrBuilder::new_node(FileType::RegularFile).build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            queries::inode::create(tx, &mut dir1)?;
+            queries::dir_entry::create(tx, root_dir.ino, OsStr::new("dir1"), dir1.ino)?;
+            queries::inode::create(tx, &mut file1)?;
+            queries::dir_entry::create(tx, dir1.ino, OsStr::new("file1"), file1.ino)?;
+            Ok(())
+        })?;
+
+        let res = driver.rmdir_impl(RequestInfo::default(), root_dir.ino, OsStr::new("dir1"));
+        assert_eq!(res, Err(Error::NotEmpty));
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::remove(tx, file1.ino)?; // should delete dir_entry through CASCADE
+            Ok(())
+        })?;
+
+        driver.rmdir_impl(RequestInfo::default(), root_dir.ino, OsStr::new("dir1"))?;
 
         Ok(())
     }

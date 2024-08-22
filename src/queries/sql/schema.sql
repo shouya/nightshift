@@ -3,6 +3,7 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 1073741824; -- 1 GiB
+PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS inode(
     ino INTEGER PRIMARY KEY,
@@ -27,15 +28,15 @@ CREATE TABLE IF NOT EXISTS inode(
 );
 
 CREATE TABLE IF NOT EXISTS dir_entry (
-    parent_ino INTEGER NOT NULL,
+    parent_ino INTEGER NOT NULL REFERENCES inode(ino) ON UPDATE CASCADE ON DELETE RESTRICT, -- do not allow directory with files to be dropped
     name BLOB NOT NULL,
-    ino INTEGER NOT NULL
+    ino INTEGER NOT NULL REFERENCES inode(ino) ON UPDATE CASCADE ON DELETE CASCADE -- if inode is deleted, delete dir entry
 );
 
 CREATE INDEX IF NOT EXISTS entry_parent_ino_name_idx ON dir_entry (parent_ino, name);
 
 CREATE TABLE IF NOT EXISTS block (
-    ino INTEGER NOT NULL,
+    ino INTEGER NOT NULL REFERENCES inode(ino) ON UPDATE CASCADE ON DELETE CASCADE, -- if inode is deleted, delete all data blocks
     bno INTEGER NOT NULL,
     data BLOB NOT NULL
 );

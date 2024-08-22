@@ -3,7 +3,7 @@ use anyhow::Context;
 use rusqlite::params;
 
 pub struct DatabaseOps {
-    db: rusqlite::Connection,
+    pub(crate) db: rusqlite::Connection,
 }
 
 impl DatabaseOps {
