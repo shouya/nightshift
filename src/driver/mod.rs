@@ -859,4 +859,45 @@ mod tests {
         assert_eq!(&data[200..], &[2u8; 200]);
         Ok(())
     }
+
+    #[test]
+    fn test_rename() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let mut root_dir = FileAttrBuilder::new_directory().build();
+        let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
+            .with_uid(1337)
+            .with_gid(1338)
+            .build();
+
+        driver.db.with_write_tx(|tx| {
+            queries::inode::create(tx, &mut root_dir)?;
+            queries::inode::create(tx, &mut node)?;
+            queries::dir_entry::create(tx, root_dir.ino, OsStr::new("foo.txt"), node.ino)?;
+            Ok(())
+        })?;
+
+        driver.rename_impl(
+            RequestInfo::default(),
+            root_dir.ino,
+            OsStr::new("foo.txt"),
+            root_dir.ino,
+            OsStr::new("foo2.txt"),
+            0,
+        )?;
+
+        let res = driver
+            .db
+            .with_read_tx(|tx| queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo.txt")));
+        assert_eq!(res, Err(Error::NotFound));
+
+        let db_attr = driver.db.with_read_tx(|tx| {
+            let ino = queries::dir_entry::lookup(tx, root_dir.ino, OsStr::new("foo2.txt"))?;
+            queries::inode::lookup(tx, ino)
+        })?;
+        assert_eq!(db_attr.ino, node.ino);
+
+        Ok(())
+    }
 }
