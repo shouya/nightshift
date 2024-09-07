@@ -6,7 +6,7 @@ use rusqlite::params;
 pub const BLOCK_SIZE: u64 = 128 * 1024;
 
 pub fn get_block(tx: &mut rusqlite::Transaction, ino: u64, bno: u64) -> Result<Block> {
-    let mut stmt = tx.prepare_cached("SELECT bno, data FROM block WHERE ino = ? AND bno >= ? ORDER BY bno")?;
+    let mut stmt = tx.prepare_cached("SELECT bno, data FROM block WHERE ino = ? AND bno = ?")?;
     let block = stmt.query_row(params![ino, bno], |row| {
         let data = row.get_ref(1)?.as_blob()?;
         let block = Block::from_compressed(ino, row.get(0)?, data);
