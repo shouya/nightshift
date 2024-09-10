@@ -3,7 +3,7 @@
 `nightshift` implements a POSIX filesystem within a SQLite database using [FUSE](https://en.wikipedia.org/wiki/Filesystem_in_Userspace).
 
 - Benefit from SQLite's renowned durability, portability and [well-documented storage format](https://www.sqlite.org/draft/locrsf.html).
-- Encryption is handled by SQLCipher, a battle tested library built on top of SQLite
+- Encryption is handled by SQLCipher, a battle tested library built on top of SQLite. SQLCipher uses AES-256.
 - Compression is handled by lz4, providing fast compression and decompression speeds
 - Hackable project: the filesystem is implemented with simple SQL queries and a few tables
 
@@ -11,7 +11,8 @@
 
 The `mount-exec` command will mount the given database at the given path using
 the given key and then run the command given in the `--cmd` arg using the optional
-`--arg` arguments.
+`--arg` arguments. Once the script exits, the filesystem is safely unmounted and
+`nightshift` will exits with a status that indicates if the script failed or not.
 
 ```bash
 nightshift mount-exec --db /tank/data/backup.db --mount "$(mktemp -d)" --key-file /opt/backup/key.txt --cmd /opt/backup/backup.bash
