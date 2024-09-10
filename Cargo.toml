@@ -24,8 +24,7 @@ slab = "0.4.9"
 test-log = "0.2.16"
 
 [profile.release]
-debug = true # For `cargo flamegraph`
-
-
-#strip = true
-#lto = "thin"
+codegen-units = 1
+strip = true
+lto = "thin"
+# debug = true      # For `cargo flamegraph`
