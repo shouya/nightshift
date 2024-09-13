@@ -265,10 +265,10 @@ impl FuseDriver {
             let mut buf = Vec::with_capacity(cap);
 
             queries::block::iter_blocks_from(tx, ino, offset, |block| {
-                block.copy_into(&mut buf);
+                block.copy_into(&mut buf, offset);
                 Ok(buf.len() < buf.capacity())
             })?;
-
+            assert!(buf.len() <= size as usize);
             Ok(buf)
         })
     }

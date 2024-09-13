@@ -136,10 +136,11 @@ impl Block {
         (written, diff)
     }
 
-    pub fn copy_into(&self, dest: &mut Vec<u8>) -> usize {
+    pub fn copy_into(&self, dest: &mut Vec<u8>, offset: u64) -> usize {
+        let rel_offset = offset.saturating_sub(self.start_offset()) as usize;
         let remaining = dest.capacity() - dest.len();
-        let max_write = cmp::min(remaining, self.data.len());
-        dest.extend_from_slice(&self.data[..max_write]);
+        let max_write = cmp::min(remaining, self.data.len() - rel_offset);
+        dest.extend_from_slice(&self.data[rel_offset..][..max_write]);
         max_write
     }
 
@@ -199,14 +200,18 @@ mod tests {
 
     #[test]
     fn test_block_copy_into() {
-        let mut b = Block::empty(0, 1);
-        b.data = vec![1; 10];
+        let mut b = Block::empty(0, 0);
+        b.data = (1u8..=10).collect();
 
         let mut buf = Vec::with_capacity(5);
-        assert_eq!(b.copy_into(&mut buf), 5);
+        assert_eq!(b.copy_into(&mut buf, 0), 5);
 
         let mut buf = Vec::with_capacity(15);
-        assert_eq!(b.copy_into(&mut buf), 10);
+        assert_eq!(b.copy_into(&mut buf, 0), 10);
+
+        let mut buf = Vec::with_capacity(5);
+        assert_eq!(b.copy_into(&mut buf, 5), 5);
+        assert_eq!(buf, &[6, 7, 8, 9, 10]);
     }
 
     #[test]
