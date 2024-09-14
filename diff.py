@@ -25,7 +25,7 @@ def check_file(path: str):
 
 def analyze(root: str):
     files = {}
-    for name in iter_files("target/release"):
+    for name in iter_files(root):
         path = osp.join(root, name)
         files[name] = check_file(path)
     return files
