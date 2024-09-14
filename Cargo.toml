@@ -22,6 +22,8 @@ simple_logger = "5.0.0"
 slab = "0.4.9"
 
 [dev-dependencies]
+rand = "0.8.5"
+sha1 = "0.10.6"
 test-log = "0.2.16"
 
 [profile.release]

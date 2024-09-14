@@ -638,6 +638,8 @@ mod tests {
 
     use super::{attr::FileAttrBuilder, FuseDriver, OpenFlags, RequestInfo};
     use crate::{database::DatabaseOps, errors::Error, queries, types::FileType};
+    use rand::{Rng, RngCore};
+    use sha1::{Digest, Sha1};
     use test_log::test;
 
     fn count_blocks(driver: &mut FuseDriver, ino: u64) -> anyhow::Result<usize> {
@@ -897,6 +899,48 @@ mod tests {
             queries::inode::lookup(tx, ino)
         })?;
         assert_eq!(db_attr.ino, node.ino);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_for_corruption() -> anyhow::Result<()> {
+        let db = DatabaseOps::open_in_memory()?;
+        let mut driver = FuseDriver::new(db);
+
+        let attr = driver.mknod_impl(RequestInfo::default(), 1, OsStr::new("foo"), libc::S_IFREG, 0, 0)?;
+        let (fh, _) = driver.open_impl(RequestInfo::default(), attr.ino, OpenFlags::from(libc::O_RDWR))?;
+
+        let max = 10 * 1024 * 1024;
+        let mut write_offset = 0;
+        let mut rng = rand::thread_rng();
+
+        let mut write_hasher = Sha1::new();
+        let mut read_hahser = Sha1::new();
+
+        while write_offset < max {
+            let size = rng.gen_range(0..130 * 1024);
+            let mut buf = vec![0u8; size];
+            rng.fill_bytes(&mut buf);
+
+            write_hasher.update(&buf);
+            driver.write_impl(RequestInfo::default(), attr.ino, fh, write_offset, &buf, 0, 0, None)?;
+
+            write_offset += buf.len() as i64;
+        }
+
+        let mut read_offset = 0;
+
+        while read_offset < write_offset {
+            let size = rng.gen_range(1..130 * 1024);
+            let buf = driver.read_impl(RequestInfo::default(), attr.ino, fh, read_offset, size, 0, None)?;
+
+            read_hahser.update(&buf);
+
+            read_offset += size as i64;
+        }
+
+        assert_eq!(write_hasher.finalize(), read_hahser.finalize());
 
         Ok(())
     }
