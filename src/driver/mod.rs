@@ -8,6 +8,9 @@ mod request_info;
 use std::{
     cmp,
     ffi::OsStr,
+    fs,
+    os::unix::fs::MetadataExt,
+    path::Path,
     time::{Duration, SystemTime},
 };
 
@@ -32,14 +35,30 @@ pub struct FuseDriver {
     pub db: DatabaseOps,
     compression: Compression,
     handles: Slab<FileHandle>,
+    mount_uid: u32,
+    mount_gid: u32,
 }
 
 impl FuseDriver {
-    pub fn new(db: DatabaseOps, compression: Compression) -> Self {
+    pub fn new(db: DatabaseOps, compression: Compression, mount_path: &Path) -> anyhow::Result<Self> {
+        let md = fs::metadata(mount_path)?;
+        Ok(Self {
+            db,
+            compression,
+            handles: Slab::new(),
+            mount_uid: md.uid(),
+            mount_gid: md.gid(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new_no_io(db: DatabaseOps, compression: Compression) -> Self {
         Self {
             db,
             compression,
             handles: Slab::new(),
+            mount_uid: 0,
+            mount_gid: 0,
         }
     }
 
@@ -62,9 +81,24 @@ impl FuseDriver {
     fn lookup_impl(&mut self, _req: RequestInfo, parent: u64, name: &OsStr) -> Result<FileAttr> {
         self.db.with_read_tx(|tx| {
             let ino = queries::dir_entry::lookup(tx, parent, name)?;
-            let attr = queries::inode::lookup(tx, ino)?;
+            let mut attr = queries::inode::lookup(tx, ino)?;
+            // Root directory should have the same owner/group as the mount target
+            if attr.ino == 1 {
+                attr.uid = self.mount_uid;
+                attr.gid = self.mount_gid;
+            }
             Ok(attr)
         })
+    }
+
+    fn getattr_impl(&mut self, _req: RequestInfo, ino: u64) -> Result<FileAttr> {
+        let mut attr = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino))?;
+        // Root directory should have the same owner/group as the mount target
+        if attr.ino == 1 {
+            attr.uid = self.mount_uid;
+            attr.gid = self.mount_gid;
+        }
+        Ok(attr)
     }
 
     fn setattr_impl(
@@ -363,9 +397,9 @@ impl fuser::Filesystem for FuseDriver {
         }
     }
 
-    fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
+    fn getattr(&mut self, req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         log::trace!("getattr(ino={})", ino);
-        let res = self.db.with_read_tx(|tx| queries::inode::lookup(tx, ino));
+        let res = self.getattr_impl(req.into(), ino);
         log::trace!("getattr: {:?}", res);
 
         match res {
@@ -665,7 +699,7 @@ mod tests {
     #[test]
     fn test_lookup() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, queries::block::Compression::None);
+        let mut driver = FuseDriver::new_no_io(db, queries::block::Compression::None);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
         let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
@@ -694,7 +728,7 @@ mod tests {
     #[test]
     fn test_mknod() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, queries::block::Compression::LZ4);
+        let mut driver = FuseDriver::new_no_io(db, queries::block::Compression::LZ4);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
 
@@ -729,7 +763,7 @@ mod tests {
     #[test]
     fn test_link_unlink() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, Compression::Zstd);
+        let mut driver = FuseDriver::new_no_io(db, Compression::Zstd);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
         let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
@@ -786,7 +820,7 @@ mod tests {
     #[test]
     fn test_mkdir() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, Compression::None);
+        let mut driver = FuseDriver::new_no_io(db, Compression::None);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
 
@@ -814,7 +848,7 @@ mod tests {
     #[test]
     fn test_rmdir() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, Compression::None);
+        let mut driver = FuseDriver::new_no_io(db, Compression::None);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
         let mut dir1 = FileAttrBuilder::new_directory().build();
@@ -845,7 +879,7 @@ mod tests {
     #[test]
     fn test_read_write_cycle() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, Compression::None);
+        let mut driver = FuseDriver::new_no_io(db, Compression::None);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
         let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
@@ -874,7 +908,7 @@ mod tests {
     #[test]
     fn test_rename() -> anyhow::Result<()> {
         let db = DatabaseOps::open_in_memory()?;
-        let mut driver = FuseDriver::new(db, Compression::None);
+        let mut driver = FuseDriver::new_no_io(db, Compression::None);
 
         let mut root_dir = FileAttrBuilder::new_directory().build();
         let mut node = FileAttrBuilder::new_node(FileType::RegularFile)
@@ -920,7 +954,7 @@ mod tests {
             dbg!(compression);
 
             let db = DatabaseOps::open_in_memory()?;
-            let mut driver = FuseDriver::new(db, compression);
+            let mut driver = FuseDriver::new_no_io(db, compression);
 
             let attr = driver.mknod_impl(RequestInfo::default(), 1, OsStr::new("foo"), libc::S_IFREG, 0, 0)?;
             let (fh, _) = driver.open_impl(RequestInfo::default(), attr.ino, OpenFlags::from(libc::O_RDWR))?;
